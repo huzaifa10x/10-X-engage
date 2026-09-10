@@ -35,13 +35,22 @@ export default function Welcome() {
                         )}
                     </nav>
                 </header>
+
                 <main className="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center">
-                    <span className="mb-4 rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold tracking-wide text-[#2b4a08] uppercase">WhatsApp Business Platform</span>
-                    <h1 className="max-w-3xl text-4xl font-semibold tracking-tight md:text-5xl">Onboard customers, send messages and manage templates on the official WhatsApp Cloud API.</h1>
-                    <p className="mt-4 max-w-xl text-muted-foreground">Meta Embedded Signup, phone registration, message sending and template creation — built on Laravel, Inertia and React.</p>
+                    <span className="mb-4 rounded-full bg-brand-soft px-3 py-1 text-xs font-semibold tracking-wide text-[#2b4a08] uppercase">
+                        WhatsApp Business Platform
+                    </span>
+                    <h1 className="max-w-3xl text-4xl font-semibold tracking-tight md:text-5xl">
+                        Onboard customers, send messages and manage templates on the official WhatsApp Cloud API.
+                    </h1>
+                    <p className="mt-4 max-w-xl text-muted-foreground">
+                        Meta Embedded Signup, phone registration, message sending and template creation — built on Laravel, Inertia and React.
+                    </p>
                     <div className="mt-8 flex gap-3">
                         <Button asChild size="lg">
-                            <Link href={auth.user ? route('onboarding.index') : route('register')}>Connect a WhatsApp account</Link>
+                            <Link href={auth.user ? route('onboarding.index') : route('register')}>
+                                Connect a WhatsApp account
+                            </Link>
                         </Button>
                     </div>
                     <div className="mt-16 grid max-w-4xl gap-6 text-left sm:grid-cols-3">
@@ -58,6 +67,23 @@ export default function Welcome() {
                         ))}
                     </div>
                 </main>
+
+                <footer className="border-t py-8 text-center text-sm text-muted-foreground">
+                    <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 px-6 sm:flex-row lg:px-12">
+                        <p>© {new Date().getFullYear()} Engage. All rights reserved.</p>
+                        <div className="flex flex-wrap items-center justify-center gap-6">
+                            <Link href={route('privacy')} className="hover:text-foreground hover:underline">
+                                Privacy Policy
+                            </Link>
+                            <Link href={route('terms')} className="hover:text-foreground hover:underline">
+                                Terms of Service
+                            </Link>
+                            <Link href={route('user-dd')} className="hover:text-foreground hover:underline">
+                                User Data Deletion
+                            </Link>
+                        </div>
+                    </div>
+                </footer>
             </div>
         </>
     );
