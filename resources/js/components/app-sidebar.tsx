@@ -4,7 +4,7 @@ import { NavUser } from '@/components/nav-user';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { type NavItem } from '@/types';
 import { Link } from '@inertiajs/react';
-import { BookOpen, Building2, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap } from 'lucide-react';
+import { BookOpen, Building2, FileText, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap, ShieldCheck, UserX } from 'lucide-react';
 import AppLogo from './app-logo';
 
 const mainNavItems: NavItem[] = [
@@ -20,6 +20,21 @@ const footerNavItems: NavItem[] = [
         title: 'Cloud API docs',
         url: 'https://developers.facebook.com/docs/whatsapp/cloud-api',
         icon: BookOpen,
+    },
+    {
+        title: 'Privacy Policy',
+        url: route('privacy'),
+        icon: ShieldCheck,
+    },
+    {
+        title: 'Terms of Service',
+        url: route('terms'),
+        icon: FileText,
+    },
+    {
+        title: 'User Data Deletion',
+        url: route('user-dd'),
+        icon: UserX,
     },
 ];
 

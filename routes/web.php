@@ -16,6 +16,16 @@ Route::get('/', function () {
     return auth()->check() ? redirect()->route('dashboard') : Inertia::render('welcome');
 })->name('home');
 
+Route::get('privacy-policy', function () {
+    return Inertia::render('privacy-policy');
+})->name('privacy');
+Route::get('terms-of-service', function () {
+    return Inertia::render('terms-of-service');
+})->name('terms');
+Route::get('user-data-deletion', function () {
+    return Inertia::render('user-data-deletion');
+})->name('user-dd');
+
 /*
 |--------------------------------------------------------------------------
 | Meta webhooks (no auth, no CSRF)
