@@ -166,12 +166,25 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
 
     const isMedia = ['image', 'video', 'document', 'audio', 'sticker'].includes(data.type);
 
+    // Validation errors for fields that are not rendered for the current type would otherwise be invisible.
+    const visiblePrefixes = ['phone_number_id', 'to', 'reply_to', 'type', data.type === 'template' ? 'template' : data.type === 'interactive' ? 'interactive' : data.type === 'location' ? 'location' : isMedia ? 'media' : 'text'];
+    const hiddenErrors = Object.entries(errors as Record<string, string>).filter(([k]) => !visiblePrefixes.some((p) => k === p || k.startsWith(`${p}.`)));
+
     return (
         <AppLayout breadcrumbs={breadcrumbs}>
             <Head title="Send message" />
             <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
                 <PageHeader title="Send a message" description="Builds the exact Messages Object and posts it to POST /{Phone-Number-ID}/messages. Free-form messages only reach users inside a 24-hour customer service window; use a template otherwise." />
                 <FlashMessages />
+                {hiddenErrors.length > 0 && (
+                    <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                        {hiddenErrors.map(([k, v]) => (
+                            <p key={k}>
+                                <span className="font-mono text-xs">{k}</span>: {v}
+                            </p>
+                        ))}
+                    </div>
+                )}
 
                 <form onSubmit={submit} className="grid gap-6 lg:grid-cols-5">
                     <div className="space-y-6 lg:col-span-3">

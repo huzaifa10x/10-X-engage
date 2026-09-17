@@ -326,6 +326,14 @@ function PhoneCard({ phone }: { phone: PhoneNumberSummary }) {
                     <div className="flex flex-wrap items-center gap-2 text-sm">
                         <CheckCircle2 className="size-4 text-brand-dark" />
                         <span>Registered {phone.registered_at ? formatDate(phone.registered_at) : ''}</span>
+                        {phone.two_step_pin && (
+                            <span className="rounded-md bg-muted px-2 py-0.5 font-mono text-xs">
+                                PIN {showPin ? phone.two_step_pin : '••••••'}
+                                <button type="button" className="ml-2 text-brand-dark underline" onClick={() => setShowPin((s) => !s)}>
+                                    {showPin ? 'hide' : 'show'}
+                                </button>
+                            </span>
+                        )}
                         {!phone.is_default && (
                             <Button size="sm" variant="ghost" onClick={() => router.post(route('phones.default', phone.id), {}, { preserveScroll: true })}>
                                 Make default

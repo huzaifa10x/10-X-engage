@@ -32,6 +32,7 @@ class EmbeddedSignupTest extends TestCase
                 'id' => '106540352242922', 'display_phone_number' => '+1 631-555-1111', 'verified_name' => "John's Cake Shop",
                 'quality_rating' => 'GREEN', 'code_verification_status' => 'VERIFIED', 'platform_type' => 'NOT_APPLICABLE',
             ]]]),
+            'graph.facebook.com/v25.0/106540352242922/register' => Http::response(['success' => true]),
             'graph.facebook.com/v25.0/524126980791429*' => Http::response([
                 'id' => '524126980791429', 'name' => 'Lucky Shrub', 'currency' => 'USD', 'timezone_id' => '1',
                 'message_template_namespace' => 'ns_123', 'account_review_status' => 'APPROVED',
@@ -53,8 +54,12 @@ class EmbeddedSignupTest extends TestCase
         $this->assertSame('Lucky Shrub', $account->name);
         $this->assertSame('ns_123', $account->message_template_namespace);
         $this->assertNotNull($account->webhook_subscribed_at);
-        $this->assertSame('webhook_subscribed', $account->onboarding_step);
-        $this->assertDatabaseHas('phone_numbers', ['phone_number_id' => '106540352242922', 'whatsapp_account_id' => $account->id]);
+        $this->assertSame('completed', $account->onboarding_step);
+        $this->assertSame('active', $account->status);
+        $phone = $account->phoneNumbers()->where('phone_number_id', '106540352242922')->firstOrFail();
+        $this->assertTrue($phone->is_registered);
+        $this->assertMatchesRegularExpression('/^\d{6}$/', $phone->two_step_pin);
+        Http::assertSent(fn ($r) => str_ends_with($r->url(), '/106540352242922/register') && $r['messaging_product'] === 'whatsapp' && strlen($r['pin']) === 6);
         $this->assertDatabaseHas('signup_sessions', ['waba_id' => '524126980791429', 'status' => 'completed']);
 
         Http::assertSent(fn ($r) => str_contains($r->url(), '/oauth/access_token') && str_contains($r->url(), 'client_id=APP') && str_contains($r->url(), 'code=AQBhlXsct'));

@@ -12,6 +12,30 @@ class SendMessageRequest extends FormRequest
         return $this->user() !== null;
     }
 
+    /**
+     * The composer submits every section of the form; keep only the one that matches the
+     * selected type so rules for hidden sections (e.g. interactive.buttons.*.title) can't fail.
+     */
+    protected function prepareForValidation(): void
+    {
+        $type = $this->input('type');
+
+        $keep = match ($type) {
+            'text' => ['text'],
+            'image', 'video', 'document', 'audio', 'sticker' => ['media'],
+            'location' => ['location'],
+            'template' => ['template'],
+            'interactive' => ['interactive'],
+            default => [],
+        };
+
+        foreach (['text', 'media', 'location', 'template', 'interactive'] as $section) {
+            if (! in_array($section, $keep, true)) {
+                $this->request->remove($section);
+            }
+        }
+    }
+
     public function rules(): array
     {
         return [
@@ -50,8 +74,8 @@ class SendMessageRequest extends FormRequest
             'interactive.body' => ['required_if:type,interactive', 'nullable', 'string', 'max:1024'],
             'interactive.footer' => ['nullable', 'string', 'max:60'],
             'interactive.buttons' => ['nullable', 'array', 'max:3'],
-            'interactive.buttons.*.id' => ['required_with:interactive.buttons', 'string', 'max:256'],
-            'interactive.buttons.*.title' => ['required_with:interactive.buttons', 'string', 'max:20'],
+            'interactive.buttons.*.id' => ['required_if:type,interactive', 'nullable', 'string', 'max:256'],
+            'interactive.buttons.*.title' => ['required_if:type,interactive', 'nullable', 'string', 'max:20'],
             'interactive.button_text' => ['nullable', 'string', 'max:20'],
             'interactive.sections' => ['nullable', 'array', 'max:10'],
         ];

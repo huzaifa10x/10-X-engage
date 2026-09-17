@@ -34,6 +34,12 @@ return [
         // Exchangeable token code TTL is 30 seconds (Meta docs) – exchanged server side immediately.
     ],
 
+    'onboarding' => [
+        // Register the phone number (POST /{Phone-Number-ID}/register) automatically at the end of Embedded Signup,
+        // using a generated 6-digit two-step PIN stored on the phone record. Falls back to manual registration on failure.
+        'auto_register' => (bool) env('WHATSAPP_AUTO_REGISTER', true),
+    ],
+
     'partner' => [
         // tech_provider | solution_partner
         'type' => env('WHATSAPP_PARTNER_TYPE', 'tech_provider'),

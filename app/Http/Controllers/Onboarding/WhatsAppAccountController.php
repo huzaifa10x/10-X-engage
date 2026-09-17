@@ -190,6 +190,7 @@ class WhatsAppAccountController extends Controller
                 'platform_type' => $p->platform_type,
                 'is_registered' => $p->is_registered,
                 'registered_at' => $p->registered_at?->toIso8601String(),
+                'two_step_pin' => $p->two_step_pin,
                 'is_default' => $p->is_default,
             ])->values(),
             'created_at' => $a->created_at?->toIso8601String(),

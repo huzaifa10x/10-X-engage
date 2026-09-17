@@ -32,10 +32,11 @@ class WabaService
     /** "Get WABA" — GET /{{WABA-ID}} */
     public function getWaba(string $wabaId, ?array $fields = null): array
     {
-        $fields ??= [
-            'id', 'name', 'currency', 'timezone_id', 'message_template_namespace', 'account_review_status',
-            'owner_business_info', 'primary_funding_id',
-        ];
+        $fields ??= array_merge(
+            ['id', 'name', 'currency', 'timezone_id', 'message_template_namespace', 'account_review_status'],
+            // Only Business Solution Providers may read these (Graph error code 10 otherwise)
+            config('whatsapp.partner.type') === 'solution_partner' ? ['owner_business_info', 'primary_funding_id'] : [],
+        );
 
         return $this->client->get($wabaId, ['fields' => implode(',', $fields)]);
     }

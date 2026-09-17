@@ -1,0 +1,352 @@
+From c41a67980cfa4bae124b9a1cb24ad260edf1dfb5 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Thu, 17 Sep 2026 11:45:20 +0000
+Subject: [PATCH] Fix silent 302 on send (hidden interactive.buttons
+ validation), auto-register phone after Embedded Signup, drop BSP-only WABA
+ fields
+
+---
+ .env.example                                  |  2 +
+ .../Onboarding/CompleteEmbeddedSignup.php     | 48 ++++++++++++++++++-
+ .../Onboarding/WhatsAppAccountController.php  |  1 +
+ app/Http/Requests/SendMessageRequest.php      | 28 ++++++++++-
+ app/Services/Meta/WabaService.php             |  9 ++--
+ config/whatsapp.php                           |  6 +++
+ resources/js/pages/accounts/show.tsx          |  8 ++++
+ resources/js/pages/messages/create.tsx        | 13 +++++
+ resources/js/types/whatsapp.ts                |  1 +
+ tests/Feature/EmbeddedSignupTest.php          |  9 +++-
+ tests/Feature/SendMessageTest.php             | 47 ++++++++++++++++++
+ 11 files changed, 162 insertions(+), 10 deletions(-)
+ create mode 100644 tests/Feature/SendMessageTest.php
+
+diff --git a/.env.example b/.env.example
+index e83fdf9..b84f512 100644
+--- a/.env.example
++++ b/.env.example
+@@ -91,6 +91,8 @@ WHATSAPP_SYSTEM_USER_ID=
+ # tech_provider (default) or solution_partner. Solution partners additionally share a
+ # line of credit with each onboarded WABA (Embedded Signup collection, Step 3).
+ WHATSAPP_PARTNER_TYPE=tech_provider
++# Auto-call POST /{Phone-Number-ID}/register at the end of Embedded Signup with a generated PIN
++WHATSAPP_AUTO_REGISTER=true
+ WHATSAPP_CREDIT_LINE_ID=
+ WHATSAPP_DEFAULT_WABA_CURRENCY=USD
+ 
+diff --git a/app/Actions/Onboarding/CompleteEmbeddedSignup.php b/app/Actions/Onboarding/CompleteEmbeddedSignup.php
+index 0bbb397..2739a79 100644
+--- a/app/Actions/Onboarding/CompleteEmbeddedSignup.php
++++ b/app/Actions/Onboarding/CompleteEmbeddedSignup.php
+@@ -22,8 +22,10 @@
+  *  6. (optional) Assign partner system user                 (POST /{WABA-ID}/assigned_users)
+  *  7. (solution partners) Share line of credit              (POST /{Credit-Line-ID}/whatsapp_credit_sharing_and_attach)
+  *
+- *  Phone registration (POST /{Phone-Number-ID}/register) needs a PIN chosen by the customer,
+- *  so it is a separate action (RegisterPhoneNumber) triggered from the account page.
++ *  5b. Register the phone number for Cloud API             (POST /{Phone-Number-ID}/register)
++ *      Runs automatically when whatsapp.onboarding.auto_register is true, using a generated
++ *      6-digit two-step PIN. If Meta rejects it (number already has a PIN / not verified), the
++ *      account page offers manual registration via RegisterPhoneNumber.
+  */
+ class CompleteEmbeddedSignup
+ {
+@@ -31,6 +33,7 @@ public function __construct(
+         protected EmbeddedSignupService $signup,
+         protected WabaService $waba,
+         protected SyncWhatsAppAccount $sync,
++        protected RegisterPhoneNumber $register,
+     ) {}
+ 
+     /**
+@@ -121,6 +124,11 @@ public function __invoke(User $user, array $input): array
+                 $warnings[] = 'Webhook subscription failed: '.$e->displayMessage();
+             }
+ 
++            // 5b. Register the onboarded phone number(s) for Cloud API
++            if (config('whatsapp.onboarding.auto_register')) {
++                $warnings = array_merge($warnings, $this->autoRegisterPhones($account, $input['phone_number_id'] ?? null));
++            }
++
+             // 6. Assign our system user to the WABA (optional, partner-level token required)
+             if (config('whatsapp.partner.system_user_id') && config('whatsapp.partner.system_user_token')) {
+                 try {
+@@ -169,4 +177,40 @@ public function __invoke(User $user, array $input): array
+             throw $e;
+         }
+     }
++
++    /**
++     * Registers the number returned by the signup popup (or every unregistered number on the WABA).
++     * Cloud API requires POST /{Phone-Number-ID}/register before the number can send or receive.
++     *
++     * @return list<string> warnings
++     */
++    protected function autoRegisterPhones(WhatsAppAccount $account, ?string $phoneNumberId): array
++    {
++        $warnings = [];
++
++        $phones = $account->phoneNumbers()
++            ->where('is_registered', false)
++            ->when($phoneNumberId, fn ($q) => $q->where('phone_number_id', $phoneNumberId))
++            ->get();
++
++        foreach ($phones as $phone) {
++            if ($phone->code_verification_status && strtoupper($phone->code_verification_status) !== 'VERIFIED') {
++                $warnings[] = "{$phone->display_phone_number}: not registered – ownership is {$phone->code_verification_status}. Verify the number, then register it from the account page.";
++                continue;
++            }
++
++            // Reuse a PIN we already know for this number, otherwise generate one.
++            $pin = $phone->two_step_pin ?: str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
++
++            try {
++                ($this->register)($phone, $pin);
++            } catch (GraphApiException $e) {
++                $phone->forceFill(['two_step_pin' => null])->save();
++                $warnings[] = "{$phone->display_phone_number}: automatic registration failed – {$e->displayMessage()} "
++                    .'If two-step verification was previously enabled on this number, register it from the account page using that PIN.';
++            }
++        }
++
++        return $warnings;
++    }
+ }
+diff --git a/app/Http/Controllers/Onboarding/WhatsAppAccountController.php b/app/Http/Controllers/Onboarding/WhatsAppAccountController.php
+index e380e04..ae515c6 100644
+--- a/app/Http/Controllers/Onboarding/WhatsAppAccountController.php
++++ b/app/Http/Controllers/Onboarding/WhatsAppAccountController.php
+@@ -190,6 +190,7 @@ protected function summary(WhatsAppAccount $a): array
+                 'platform_type' => $p->platform_type,
+                 'is_registered' => $p->is_registered,
+                 'registered_at' => $p->registered_at?->toIso8601String(),
++                'two_step_pin' => $p->two_step_pin,
+                 'is_default' => $p->is_default,
+             ])->values(),
+             'created_at' => $a->created_at?->toIso8601String(),
+diff --git a/app/Http/Requests/SendMessageRequest.php b/app/Http/Requests/SendMessageRequest.php
+index a1b794d..69587e7 100644
+--- a/app/Http/Requests/SendMessageRequest.php
++++ b/app/Http/Requests/SendMessageRequest.php
+@@ -12,6 +12,30 @@ public function authorize(): bool
+         return $this->user() !== null;
+     }
+ 
++    /**
++     * The composer submits every section of the form; keep only the one that matches the
++     * selected type so rules for hidden sections (e.g. interactive.buttons.*.title) can't fail.
++     */
++    protected function prepareForValidation(): void
++    {
++        $type = $this->input('type');
++
++        $keep = match ($type) {
++            'text' => ['text'],
++            'image', 'video', 'document', 'audio', 'sticker' => ['media'],
++            'location' => ['location'],
++            'template' => ['template'],
++            'interactive' => ['interactive'],
++            default => [],
++        };
++
++        foreach (['text', 'media', 'location', 'template', 'interactive'] as $section) {
++            if (! in_array($section, $keep, true)) {
++                $this->request->remove($section);
++            }
++        }
++    }
++
+     public function rules(): array
+     {
+         return [
+@@ -50,8 +74,8 @@ public function rules(): array
+             'interactive.body' => ['required_if:type,interactive', 'nullable', 'string', 'max:1024'],
+             'interactive.footer' => ['nullable', 'string', 'max:60'],
+             'interactive.buttons' => ['nullable', 'array', 'max:3'],
+-            'interactive.buttons.*.id' => ['required_with:interactive.buttons', 'string', 'max:256'],
+-            'interactive.buttons.*.title' => ['required_with:interactive.buttons', 'string', 'max:20'],
++            'interactive.buttons.*.id' => ['required_if:type,interactive', 'nullable', 'string', 'max:256'],
++            'interactive.buttons.*.title' => ['required_if:type,interactive', 'nullable', 'string', 'max:20'],
+             'interactive.button_text' => ['nullable', 'string', 'max:20'],
+             'interactive.sections' => ['nullable', 'array', 'max:10'],
+         ];
+diff --git a/app/Services/Meta/WabaService.php b/app/Services/Meta/WabaService.php
+index c4d1a19..2a11b92 100644
+--- a/app/Services/Meta/WabaService.php
++++ b/app/Services/Meta/WabaService.php
+@@ -32,10 +32,11 @@ public function withToken(string $token): static
+     /** "Get WABA" — GET /{{WABA-ID}} */
+     public function getWaba(string $wabaId, ?array $fields = null): array
+     {
+-        $fields ??= [
+-            'id', 'name', 'currency', 'timezone_id', 'message_template_namespace', 'account_review_status',
+-            'owner_business_info', 'primary_funding_id',
+-        ];
++        $fields ??= array_merge(
++            ['id', 'name', 'currency', 'timezone_id', 'message_template_namespace', 'account_review_status'],
++            // Only Business Solution Providers may read these (Graph error code 10 otherwise)
++            config('whatsapp.partner.type') === 'solution_partner' ? ['owner_business_info', 'primary_funding_id'] : [],
++        );
+ 
+         return $this->client->get($wabaId, ['fields' => implode(',', $fields)]);
+     }
+diff --git a/config/whatsapp.php b/config/whatsapp.php
+index fccf48a..198630f 100644
+--- a/config/whatsapp.php
++++ b/config/whatsapp.php
+@@ -34,6 +34,12 @@
+         // Exchangeable token code TTL is 30 seconds (Meta docs) – exchanged server side immediately.
+     ],
+ 
++    'onboarding' => [
++        // Register the phone number (POST /{Phone-Number-ID}/register) automatically at the end of Embedded Signup,
++        // using a generated 6-digit two-step PIN stored on the phone record. Falls back to manual registration on failure.
++        'auto_register' => (bool) env('WHATSAPP_AUTO_REGISTER', true),
++    ],
++
+     'partner' => [
+         // tech_provider | solution_partner
+         'type' => env('WHATSAPP_PARTNER_TYPE', 'tech_provider'),
+diff --git a/resources/js/pages/accounts/show.tsx b/resources/js/pages/accounts/show.tsx
+index 423c892..930153e 100644
+--- a/resources/js/pages/accounts/show.tsx
++++ b/resources/js/pages/accounts/show.tsx
+@@ -326,6 +326,14 @@ function PhoneCard({ phone }: { phone: PhoneNumberSummary }) {
+                     <div className="flex flex-wrap items-center gap-2 text-sm">
+                         <CheckCircle2 className="size-4 text-brand-dark" />
+                         <span>Registered {phone.registered_at ? formatDate(phone.registered_at) : ''}</span>
++                        {phone.two_step_pin && (
++                            <span className="rounded-md bg-muted px-2 py-0.5 font-mono text-xs">
++                                PIN {showPin ? phone.two_step_pin : '••••••'}
++                                <button type="button" className="ml-2 text-brand-dark underline" onClick={() => setShowPin((s) => !s)}>
++                                    {showPin ? 'hide' : 'show'}
++                                </button>
++                            </span>
++                        )}
+                         {!phone.is_default && (
+                             <Button size="sm" variant="ghost" onClick={() => router.post(route('phones.default', phone.id), {}, { preserveScroll: true })}>
+                                 Make default
+diff --git a/resources/js/pages/messages/create.tsx b/resources/js/pages/messages/create.tsx
+index 12b7a50..898db9a 100644
+--- a/resources/js/pages/messages/create.tsx
++++ b/resources/js/pages/messages/create.tsx
+@@ -166,12 +166,25 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
+ 
+     const isMedia = ['image', 'video', 'document', 'audio', 'sticker'].includes(data.type);
+ 
++    // Validation errors for fields that are not rendered for the current type would otherwise be invisible.
++    const visiblePrefixes = ['phone_number_id', 'to', 'reply_to', 'type', data.type === 'template' ? 'template' : data.type === 'interactive' ? 'interactive' : data.type === 'location' ? 'location' : isMedia ? 'media' : 'text'];
++    const hiddenErrors = Object.entries(errors as Record<string, string>).filter(([k]) => !visiblePrefixes.some((p) => k === p || k.startsWith(`${p}.`)));
++
+     return (
+         <AppLayout breadcrumbs={breadcrumbs}>
+             <Head title="Send message" />
+             <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
+                 <PageHeader title="Send a message" description="Builds the exact Messages Object and posts it to POST /{Phone-Number-ID}/messages. Free-form messages only reach users inside a 24-hour customer service window; use a template otherwise." />
+                 <FlashMessages />
++                {hiddenErrors.length > 0 && (
++                    <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
++                        {hiddenErrors.map(([k, v]) => (
++                            <p key={k}>
++                                <span className="font-mono text-xs">{k}</span>: {v}
++                            </p>
++                        ))}
++                    </div>
++                )}
+ 
+                 <form onSubmit={submit} className="grid gap-6 lg:grid-cols-5">
+                     <div className="space-y-6 lg:col-span-3">
+diff --git a/resources/js/types/whatsapp.ts b/resources/js/types/whatsapp.ts
+index bb5e2fa..d4316a5 100644
+--- a/resources/js/types/whatsapp.ts
++++ b/resources/js/types/whatsapp.ts
+@@ -10,6 +10,7 @@ export interface PhoneNumberSummary {
+     messaging_limit_tier: string | null;
+     platform_type: string | null;
+     is_registered: boolean;
++    two_step_pin?: string | null;
+     registered_at: string | null;
+     is_default: boolean;
+ }
+diff --git a/tests/Feature/EmbeddedSignupTest.php b/tests/Feature/EmbeddedSignupTest.php
+index 03f960c..c221263 100644
+--- a/tests/Feature/EmbeddedSignupTest.php
++++ b/tests/Feature/EmbeddedSignupTest.php
+@@ -32,6 +32,7 @@ public function test_callback_runs_the_documented_onboarding_sequence(): void
+                 'id' => '106540352242922', 'display_phone_number' => '+1 631-555-1111', 'verified_name' => "John's Cake Shop",
+                 'quality_rating' => 'GREEN', 'code_verification_status' => 'VERIFIED', 'platform_type' => 'NOT_APPLICABLE',
+             ]]]),
++            'graph.facebook.com/v25.0/106540352242922/register' => Http::response(['success' => true]),
+             'graph.facebook.com/v25.0/524126980791429*' => Http::response([
+                 'id' => '524126980791429', 'name' => 'Lucky Shrub', 'currency' => 'USD', 'timezone_id' => '1',
+                 'message_template_namespace' => 'ns_123', 'account_review_status' => 'APPROVED',
+@@ -53,8 +54,12 @@ public function test_callback_runs_the_documented_onboarding_sequence(): void
+         $this->assertSame('Lucky Shrub', $account->name);
+         $this->assertSame('ns_123', $account->message_template_namespace);
+         $this->assertNotNull($account->webhook_subscribed_at);
+-        $this->assertSame('webhook_subscribed', $account->onboarding_step);
+-        $this->assertDatabaseHas('phone_numbers', ['phone_number_id' => '106540352242922', 'whatsapp_account_id' => $account->id]);
++        $this->assertSame('completed', $account->onboarding_step);
++        $this->assertSame('active', $account->status);
++        $phone = $account->phoneNumbers()->where('phone_number_id', '106540352242922')->firstOrFail();
++        $this->assertTrue($phone->is_registered);
++        $this->assertMatchesRegularExpression('/^\d{6}$/', $phone->two_step_pin);
++        Http::assertSent(fn ($r) => str_ends_with($r->url(), '/106540352242922/register') && $r['messaging_product'] === 'whatsapp' && strlen($r['pin']) === 6);
+         $this->assertDatabaseHas('signup_sessions', ['waba_id' => '524126980791429', 'status' => 'completed']);
+ 
+         Http::assertSent(fn ($r) => str_contains($r->url(), '/oauth/access_token') && str_contains($r->url(), 'client_id=APP') && str_contains($r->url(), 'code=AQBhlXsct'));
+diff --git a/tests/Feature/SendMessageTest.php b/tests/Feature/SendMessageTest.php
+new file mode 100644
+index 0000000..3cda3d5
+--- /dev/null
++++ b/tests/Feature/SendMessageTest.php
+@@ -0,0 +1,47 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Models\PhoneNumber;
++use App\Models\User;
++use App\Models\WhatsAppAccount;
++use App\Models\Workspace;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\Http;
++use Tests\TestCase;
++
++class SendMessageTest extends TestCase
++{
++    use RefreshDatabase;
++
++    public function test_text_message_sends_even_when_other_sections_are_submitted_empty(): void
++    {
++        Http::fake(['graph.facebook.com/*/PN1/messages' => Http::response([
++            'messaging_product' => 'whatsapp',
++            'contacts' => [['input' => '+923121057349', 'wa_id' => '923121057349']],
++            'messages' => [['id' => 'wamid.test']],
++        ])]);
++
++        $workspace = Workspace::create(['name' => 'W', 'slug' => 'w']);
++        $user = User::factory()->create(['workspace_id' => $workspace->id]);
++        $account = WhatsAppAccount::create(['workspace_id' => $workspace->id, 'waba_id' => '1', 'access_token' => 'T', 'status' => 'active']);
++        $phone = PhoneNumber::create(['whatsapp_account_id' => $account->id, 'phone_number_id' => 'PN1', 'display_phone_number' => '+971 58 549 6310', 'is_registered' => true]);
++
++        // Exactly what the composer submits for a text message
++        $response = $this->actingAs($user)->post(route('messages.store'), [
++            'phone_number_id' => $phone->id,
++            'to' => '923121057349',
++            'type' => 'text',
++            'reply_to' => '',
++            'text' => ['body' => 'Hi', 'preview_url' => false],
++            'media' => ['source' => 'link', 'link' => '', 'id' => '', 'caption' => '', 'filename' => ''],
++            'location' => ['latitude' => '', 'longitude' => '', 'name' => '', 'address' => ''],
++            'template' => ['id' => '', 'header' => [], 'body' => [], 'buttons' => []],
++            'interactive' => ['kind' => 'button', 'header' => '', 'body' => '', 'footer' => '', 'buttons' => [['id' => 'btn_1', 'title' => '']]],
++        ]);
++
++        $response->assertSessionHasNoErrors();
++        $this->assertDatabaseHas('messages', ['wamid' => 'wamid.test', 'status' => 'accepted', 'to' => '923121057349']);
++        Http::assertSent(fn ($r) => $r['to'] === '923121057349' && $r['text']['body'] === 'Hi');
++    }
++}
+-- 
+2.43.0
+

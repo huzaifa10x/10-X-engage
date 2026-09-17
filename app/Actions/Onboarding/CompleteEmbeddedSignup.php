@@ -22,8 +22,10 @@ use Illuminate\Support\Facades\Log;
  *  6. (optional) Assign partner system user                 (POST /{WABA-ID}/assigned_users)
  *  7. (solution partners) Share line of credit              (POST /{Credit-Line-ID}/whatsapp_credit_sharing_and_attach)
  *
- *  Phone registration (POST /{Phone-Number-ID}/register) needs a PIN chosen by the customer,
- *  so it is a separate action (RegisterPhoneNumber) triggered from the account page.
+ *  5b. Register the phone number for Cloud API             (POST /{Phone-Number-ID}/register)
+ *      Runs automatically when whatsapp.onboarding.auto_register is true, using a generated
+ *      6-digit two-step PIN. If Meta rejects it (number already has a PIN / not verified), the
+ *      account page offers manual registration via RegisterPhoneNumber.
  */
 class CompleteEmbeddedSignup
 {
@@ -31,6 +33,7 @@ class CompleteEmbeddedSignup
         protected EmbeddedSignupService $signup,
         protected WabaService $waba,
         protected SyncWhatsAppAccount $sync,
+        protected RegisterPhoneNumber $register,
     ) {}
 
     /**
@@ -121,6 +124,11 @@ class CompleteEmbeddedSignup
                 $warnings[] = 'Webhook subscription failed: '.$e->displayMessage();
             }
 
+            // 5b. Register the onboarded phone number(s) for Cloud API
+            if (config('whatsapp.onboarding.auto_register')) {
+                $warnings = array_merge($warnings, $this->autoRegisterPhones($account, $input['phone_number_id'] ?? null));
+            }
+
             // 6. Assign our system user to the WABA (optional, partner-level token required)
             if (config('whatsapp.partner.system_user_id') && config('whatsapp.partner.system_user_token')) {
                 try {
@@ -168,5 +176,41 @@ class CompleteEmbeddedSignup
 
             throw $e;
         }
+    }
+
+    /**
+     * Registers the number returned by the signup popup (or every unregistered number on the WABA).
+     * Cloud API requires POST /{Phone-Number-ID}/register before the number can send or receive.
+     *
+     * @return list<string> warnings
+     */
+    protected function autoRegisterPhones(WhatsAppAccount $account, ?string $phoneNumberId): array
+    {
+        $warnings = [];
+
+        $phones = $account->phoneNumbers()
+            ->where('is_registered', false)
+            ->when($phoneNumberId, fn ($q) => $q->where('phone_number_id', $phoneNumberId))
+            ->get();
+
+        foreach ($phones as $phone) {
+            if ($phone->code_verification_status && strtoupper($phone->code_verification_status) !== 'VERIFIED') {
+                $warnings[] = "{$phone->display_phone_number}: not registered – ownership is {$phone->code_verification_status}. Verify the number, then register it from the account page.";
+                continue;
+            }
+
+            // Reuse a PIN we already know for this number, otherwise generate one.
+            $pin = $phone->two_step_pin ?: str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+            try {
+                ($this->register)($phone, $pin);
+            } catch (GraphApiException $e) {
+                $phone->forceFill(['two_step_pin' => null])->save();
+                $warnings[] = "{$phone->display_phone_number}: automatic registration failed – {$e->displayMessage()} "
+                    .'If two-step verification was previously enabled on this number, register it from the account page using that PIN.';
+            }
+        }
+
+        return $warnings;
     }
 }

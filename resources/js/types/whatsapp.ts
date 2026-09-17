@@ -10,6 +10,7 @@ export interface PhoneNumberSummary {
     messaging_limit_tier: string | null;
     platform_type: string | null;
     is_registered: boolean;
+    two_step_pin?: string | null;
     registered_at: string | null;
     is_default: boolean;
 }
