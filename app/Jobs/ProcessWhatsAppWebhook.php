@@ -117,6 +117,7 @@ class ProcessWhatsAppWebhook implements ShouldQueue
                     'received_at' => $receivedAt,
                     'error_code' => $incoming['errors'][0]['code'] ?? null,
                     'error_title' => $incoming['errors'][0]['title'] ?? null,
+                    'error_message' => $incoming['errors'][0]['error_data']['details'] ?? $incoming['errors'][0]['message'] ?? null,
                 ]
             );
 
@@ -184,6 +185,7 @@ class ProcessWhatsAppWebhook implements ShouldQueue
             'reaction' => 'Reaction: '.($m['reaction']['emoji'] ?? ''),
             'contacts' => 'Contact card',
             'order' => 'Order',
+            'unsupported' => 'Unsupported message'.(isset($m['unsupported']['type']) ? ' ('.$m['unsupported']['type'].')' : ''),
             default => ucfirst($m['type'] ?? 'unknown'),
         };
     }

@@ -133,6 +133,48 @@ class InboxTest extends TestCase
             ->assertJsonPath('messages.1.direction', 'outbound');
     }
 
+    public function test_unsupported_inbound_message_still_opens_the_window(): void
+    {
+        $contact = $this->contact();
+
+        $event = WebhookEvent::create(['object' => 'whatsapp_business_account', 'waba_id' => '111', 'field' => 'messages', 'payload' => ['change' => [
+            'field' => 'messages',
+            'value' => [
+                'messaging_product' => 'whatsapp',
+                'metadata' => ['display_phone_number' => '971585496310', 'phone_number_id' => 'PN1'],
+                'contacts' => [['profile' => ['name' => 'Ali'], 'wa_id' => '923121057349']],
+                'messages' => [[
+                    'from' => '923121057349', 'id' => 'wamid.unsup', 'timestamp' => (string) now()->timestamp, 'type' => 'unsupported',
+                    'errors' => [['code' => 131060, 'title' => 'This message is currently unavailable.', 'message' => 'This message is currently unavailable.', 'error_data' => ['details' => 'Message is unavailable']]],
+                ]],
+            ],
+        ]]]);
+        (new ProcessWhatsAppWebhook($event->id))->handle();
+
+        $contact->refresh();
+        $this->assertTrue($contact->isWindowOpen());
+        $this->assertSame('Unsupported message', $contact->last_message_preview);
+        $this->assertSame(1, $contact->unread_count);
+
+        $this->actingAs($this->user)->getJson(route('inbox.messages', $contact))
+            ->assertJsonPath('messages.0.body.unsupported.code', 131060);
+
+        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
+    }
+
+    public function test_rebuild_command_restores_window_from_messages(): void
+    {
+        $contact = $this->contact();
+        $contact->messages()->create(['workspace_id' => $contact->workspace_id, 'phone_number_id' => $this->phone->id, 'direction' => 'inbound', 'type' => 'text', 'status' => 'received', 'from' => $contact->wa_id, 'preview' => 'Hello', 'wamid' => 'wamid.old', 'received_at' => now()->subHours(2)]);
+
+        $this->artisan('engage:rebuild-conversations')->assertSuccessful();
+
+        $contact->refresh();
+        $this->assertTrue($contact->isWindowOpen());
+        $this->assertSame('inbound', $contact->window_opened_by);
+        $this->assertSame('Hello', $contact->last_message_preview);
+    }
+
     public function test_contacts_crud(): void
     {
         $this->actingAs($this->user)->post(route('contacts.store'), ['name' => 'Sara', 'phone' => '+971 50 123 4567', 'tags' => ['lead', 'lead', ' vip '], 'email' => 'sara@example.com'])

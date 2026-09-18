@@ -2,7 +2,7 @@ import StatusTicks from '@/components/inbox/status-ticks';
 import { formatTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { type ChatMessage } from '@/types/whatsapp';
-import { FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
+import { Ban, FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
 
 const mediaIcon: Record<string, typeof ImageIcon> = { image: ImageIcon, video: Video, document: FileText, audio: Mic, sticker: ImageIcon };
 
@@ -30,6 +30,17 @@ function Content({ m }: { m: ChatMessage }) {
             <a className="flex items-center gap-2 text-sm underline-offset-2 hover:underline" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${b.location.latitude},${b.location.longitude}`}>
                 <MapPin className="size-4 shrink-0" /> {b.location.name || `${b.location.latitude}, ${b.location.longitude}`}
             </a>
+        );
+    }
+    if (b.unsupported) {
+        return (
+            <div className="space-y-1">
+                <p className="flex items-center gap-1 text-sm font-medium text-zinc-700">
+                    <Ban className="size-4 shrink-0" /> Unsupported message{b.unsupported.kind ? ` · ${b.unsupported.kind}` : ''}
+                </p>
+                <p className="text-xs text-muted-foreground">{b.unsupported.hint}</p>
+                {b.unsupported.code && <p className="text-[10px] text-muted-foreground">Meta #{b.unsupported.code}{b.unsupported.detail ? ` · ${b.unsupported.detail}` : ''}</p>}
+            </div>
         );
     }
     if (b.template) {

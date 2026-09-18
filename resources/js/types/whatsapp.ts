@@ -145,6 +145,7 @@ export interface ChatMessage {
         location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
         template?: { name: string | null; text: string | null };
         interactive?: Record<string, unknown> | null;
+        unsupported?: { kind: string | null; code: number | null; detail: string | null; hint: string };
     };
     context_wamid: string | null;
     template_id: number | null;

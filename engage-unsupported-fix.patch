@@ -1,0 +1,223 @@
+From a30993f2825c51c8a3520dff7e8bdf74397ce436 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Fri, 18 Sep 2026 07:38:47 +0000
+Subject: [PATCH] Inbox: explain unsupported inbound messages (131051/131060),
+ add engage:rebuild-conversations command
+
+---
+ app/Console/Commands/RebuildConversations.php | 63 +++++++++++++++++++
+ .../Controllers/Inbox/InboxController.php     |  8 +++
+ app/Jobs/ProcessWhatsAppWebhook.php           |  2 +
+ .../js/components/inbox/message-bubble.tsx    | 13 +++-
+ resources/js/types/whatsapp.ts                |  1 +
+ tests/Feature/InboxTest.php                   | 42 +++++++++++++
+ 6 files changed, 128 insertions(+), 1 deletion(-)
+ create mode 100644 app/Console/Commands/RebuildConversations.php
+
+diff --git a/app/Console/Commands/RebuildConversations.php b/app/Console/Commands/RebuildConversations.php
+new file mode 100644
+index 0000000..e611f3a
+--- /dev/null
++++ b/app/Console/Commands/RebuildConversations.php
+@@ -0,0 +1,63 @@
++<?php
++
++namespace App\Console\Commands;
++
++use App\Models\Contact;
++use App\Models\Message;
++use Illuminate\Console\Command;
++
++/**
++ * Recomputes the inbox summary (last message, unread, 24-hour window) for every contact from the
++ * messages table. Use after deploying phase 2 on a database that already had messages, or if the
++ * queue processed webhooks while the contacts migration was still pending.
++ */
++class RebuildConversations extends Command
++{
++    protected $signature = 'engage:rebuild-conversations {--workspace= : Only this workspace id}';
++
++    protected $description = 'Rebuild contact conversation summaries and 24-hour windows from stored messages';
++
++    public function handle(): int
++    {
++        $contacts = Contact::query()->when($this->option('workspace'), fn ($q, $w) => $q->where('workspace_id', $w))->get();
++        $bar = $this->output->createProgressBar($contacts->count());
++
++        foreach ($contacts as $contact) {
++            $last = $contact->messages()->latest('id')->first();
++            $lastInbound = $contact->messages()->where('direction', Message::DIRECTION_INBOUND)->latest('id')->first();
++            $lastTemplate = config('whatsapp.conversation.template_opens_window')
++                ? $contact->messages()->where('direction', Message::DIRECTION_OUTBOUND)->where('type', 'template')->whereIn('status', ['accepted', 'sent', 'delivered', 'read'])->latest('id')->first()
++                : null;
++
++            $inboundAt = $lastInbound?->received_at ?? $lastInbound?->created_at;
++            $templateAt = $lastTemplate?->created_at;
++
++            $openedBy = null;
++            $openedAt = null;
++            if ($inboundAt && (! $templateAt || $inboundAt->gte($templateAt))) {
++                [$openedBy, $openedAt] = [Contact::OPENED_BY_INBOUND, $inboundAt];
++            } elseif ($templateAt) {
++                [$openedBy, $openedAt] = [Contact::OPENED_BY_TEMPLATE, $templateAt];
++            }
++
++            $contact->forceFill([
++                'last_message_at' => $last ? ($last->direction === Message::DIRECTION_INBOUND ? ($last->received_at ?? $last->created_at) : $last->created_at) : null,
++                'last_message_preview' => $last?->preview,
++                'last_message_direction' => $last?->direction,
++                'last_inbound_at' => $inboundAt,
++                'phone_number_id' => $contact->phone_number_id ?? $last?->phone_number_id,
++                'phone' => $contact->phone ?: '+'.$contact->wa_id,
++                'window_expires_at' => $openedAt?->copy()->addHours(Contact::WINDOW_HOURS),
++                'window_opened_by' => $openedBy,
++            ])->save();
++
++            $bar->advance();
++        }
++
++        $bar->finish();
++        $this->newLine();
++        $this->info("Rebuilt {$contacts->count()} contact(s).");
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/app/Http/Controllers/Inbox/InboxController.php b/app/Http/Controllers/Inbox/InboxController.php
+index 7e1024f..74a8ae6 100644
+--- a/app/Http/Controllers/Inbox/InboxController.php
++++ b/app/Http/Controllers/Inbox/InboxController.php
+@@ -266,6 +266,14 @@ protected static function body(Message $m): array
+             'interactive' => ['interactive' => $p['interactive'] ?? null, 'text' => $m->preview],
+             'button' => ['text' => $p['button']['text'] ?? $m->preview],
+             'reaction' => ['text' => ($p['reaction']['emoji'] ?? '').' (reaction)'],
++            'unsupported' => ['unsupported' => [
++                'kind' => $p['unsupported']['type'] ?? null,
++                'code' => $m->error_code,
++                'detail' => $m->error_message ?? $m->error_title,
++                'hint' => $m->error_code === 131060
++                    ? 'First message after this number moved from the WhatsApp Business app — the content is not delivered by Meta. Ask the customer to send again; the 24-hour window is open.'
++                    : 'This message type (poll, edited message, GIF, etc.) is not delivered by the Cloud API. Ask the customer to resend as text.',
++            ]],
+             default => ['text' => $m->preview],
+         };
+     }
+diff --git a/app/Jobs/ProcessWhatsAppWebhook.php b/app/Jobs/ProcessWhatsAppWebhook.php
+index 9b2463b..ab327f7 100644
+--- a/app/Jobs/ProcessWhatsAppWebhook.php
++++ b/app/Jobs/ProcessWhatsAppWebhook.php
+@@ -117,6 +117,7 @@ protected function handleMessages(WebhookEvent $event, array $value): void
+                     'received_at' => $receivedAt,
+                     'error_code' => $incoming['errors'][0]['code'] ?? null,
+                     'error_title' => $incoming['errors'][0]['title'] ?? null,
++                    'error_message' => $incoming['errors'][0]['error_data']['details'] ?? $incoming['errors'][0]['message'] ?? null,
+                 ]
+             );
+ 
+@@ -184,6 +185,7 @@ protected function inboundPreview(array $m): string
+             'reaction' => 'Reaction: '.($m['reaction']['emoji'] ?? ''),
+             'contacts' => 'Contact card',
+             'order' => 'Order',
++            'unsupported' => 'Unsupported message'.(isset($m['unsupported']['type']) ? ' ('.$m['unsupported']['type'].')' : ''),
+             default => ucfirst($m['type'] ?? 'unknown'),
+         };
+     }
+diff --git a/resources/js/components/inbox/message-bubble.tsx b/resources/js/components/inbox/message-bubble.tsx
+index dcca441..e5fc0f6 100644
+--- a/resources/js/components/inbox/message-bubble.tsx
++++ b/resources/js/components/inbox/message-bubble.tsx
+@@ -2,7 +2,7 @@ import StatusTicks from '@/components/inbox/status-ticks';
+ import { formatTime } from '@/lib/format';
+ import { cn } from '@/lib/utils';
+ import { type ChatMessage } from '@/types/whatsapp';
+-import { FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
++import { Ban, FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
+ 
+ const mediaIcon: Record<string, typeof ImageIcon> = { image: ImageIcon, video: Video, document: FileText, audio: Mic, sticker: ImageIcon };
+ 
+@@ -32,6 +32,17 @@ function Content({ m }: { m: ChatMessage }) {
+             </a>
+         );
+     }
++    if (b.unsupported) {
++        return (
++            <div className="space-y-1">
++                <p className="flex items-center gap-1 text-sm font-medium text-zinc-700">
++                    <Ban className="size-4 shrink-0" /> Unsupported message{b.unsupported.kind ? ` · ${b.unsupported.kind}` : ''}
++                </p>
++                <p className="text-xs text-muted-foreground">{b.unsupported.hint}</p>
++                {b.unsupported.code && <p className="text-[10px] text-muted-foreground">Meta #{b.unsupported.code}{b.unsupported.detail ? ` · ${b.unsupported.detail}` : ''}</p>}
++            </div>
++        );
++    }
+     if (b.template) {
+         return (
+             <div className="space-y-1">
+diff --git a/resources/js/types/whatsapp.ts b/resources/js/types/whatsapp.ts
+index 3a50196..7e1f869 100644
+--- a/resources/js/types/whatsapp.ts
++++ b/resources/js/types/whatsapp.ts
+@@ -145,6 +145,7 @@ export interface ChatMessage {
+         location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
+         template?: { name: string | null; text: string | null };
+         interactive?: Record<string, unknown> | null;
++        unsupported?: { kind: string | null; code: number | null; detail: string | null; hint: string };
+     };
+     context_wamid: string | null;
+     template_id: number | null;
+diff --git a/tests/Feature/InboxTest.php b/tests/Feature/InboxTest.php
+index be07880..8603913 100644
+--- a/tests/Feature/InboxTest.php
++++ b/tests/Feature/InboxTest.php
+@@ -133,6 +133,48 @@ public function test_inbound_message_creates_contact_opens_window_and_counts_unr
+             ->assertJsonPath('messages.1.direction', 'outbound');
+     }
+ 
++    public function test_unsupported_inbound_message_still_opens_the_window(): void
++    {
++        $contact = $this->contact();
++
++        $event = WebhookEvent::create(['object' => 'whatsapp_business_account', 'waba_id' => '111', 'field' => 'messages', 'payload' => ['change' => [
++            'field' => 'messages',
++            'value' => [
++                'messaging_product' => 'whatsapp',
++                'metadata' => ['display_phone_number' => '971585496310', 'phone_number_id' => 'PN1'],
++                'contacts' => [['profile' => ['name' => 'Ali'], 'wa_id' => '923121057349']],
++                'messages' => [[
++                    'from' => '923121057349', 'id' => 'wamid.unsup', 'timestamp' => (string) now()->timestamp, 'type' => 'unsupported',
++                    'errors' => [['code' => 131060, 'title' => 'This message is currently unavailable.', 'message' => 'This message is currently unavailable.', 'error_data' => ['details' => 'Message is unavailable']]],
++                ]],
++            ],
++        ]]]);
++        (new ProcessWhatsAppWebhook($event->id))->handle();
++
++        $contact->refresh();
++        $this->assertTrue($contact->isWindowOpen());
++        $this->assertSame('Unsupported message', $contact->last_message_preview);
++        $this->assertSame(1, $contact->unread_count);
++
++        $this->actingAs($this->user)->getJson(route('inbox.messages', $contact))
++            ->assertJsonPath('messages.0.body.unsupported.code', 131060);
++
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
++    }
++
++    public function test_rebuild_command_restores_window_from_messages(): void
++    {
++        $contact = $this->contact();
++        $contact->messages()->create(['workspace_id' => $contact->workspace_id, 'phone_number_id' => $this->phone->id, 'direction' => 'inbound', 'type' => 'text', 'status' => 'received', 'from' => $contact->wa_id, 'preview' => 'Hello', 'wamid' => 'wamid.old', 'received_at' => now()->subHours(2)]);
++
++        $this->artisan('engage:rebuild-conversations')->assertSuccessful();
++
++        $contact->refresh();
++        $this->assertTrue($contact->isWindowOpen());
++        $this->assertSame('inbound', $contact->window_opened_by);
++        $this->assertSame('Hello', $contact->last_message_preview);
++    }
++
+     public function test_contacts_crud(): void
+     {
+         $this->actingAs($this->user)->post(route('contacts.store'), ['name' => 'Sara', 'phone' => '+971 50 123 4567', 'tags' => ['lead', 'lead', ' vip '], 'email' => 'sara@example.com'])
+-- 
+2.43.0
+

@@ -266,6 +266,14 @@ class InboxController extends Controller
             'interactive' => ['interactive' => $p['interactive'] ?? null, 'text' => $m->preview],
             'button' => ['text' => $p['button']['text'] ?? $m->preview],
             'reaction' => ['text' => ($p['reaction']['emoji'] ?? '').' (reaction)'],
+            'unsupported' => ['unsupported' => [
+                'kind' => $p['unsupported']['type'] ?? null,
+                'code' => $m->error_code,
+                'detail' => $m->error_message ?? $m->error_title,
+                'hint' => $m->error_code === 131060
+                    ? 'First message after this number moved from the WhatsApp Business app — the content is not delivered by Meta. Ask the customer to send again; the 24-hour window is open.'
+                    : 'This message type (poll, edited message, GIF, etc.) is not delivered by the Cloud API. Ask the customer to resend as text.',
+            ]],
             default => ['text' => $m->preview],
         };
     }
