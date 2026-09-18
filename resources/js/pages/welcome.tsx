@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { type SharedData } from '@/types';
 import { Head, Link, usePage } from '@inertiajs/react';
 import { LayoutTemplate, MessageSquareText, PlugZap } from 'lucide-react';
+import logo from '../../../public/favicon.ico'
 
 export default function Welcome() {
     const { auth } = usePage<SharedData>().props;
@@ -13,10 +14,11 @@ export default function Welcome() {
             <div className="flex min-h-screen flex-col bg-white text-foreground">
                 <header className="flex items-center justify-between px-6 py-4 lg:px-12">
                     <div className="flex items-center gap-2">
-                        <div className="flex size-9 items-center justify-center rounded-md bg-brand">
+                        {/* <div className="flex size-9 items-center justify-center rounded-md bg-brand">
                             <AppLogoIcon className="size-5 fill-current text-[#14200a]" />
                         </div>
-                        <span className="text-lg font-semibold">Engage</span>
+                        <span className="text-lg font-semibold">Engage</span> */}
+                        <img src={logo} width={60} height={60} />
                     </div>
                     <nav className="flex items-center gap-2">
                         {auth.user ? (

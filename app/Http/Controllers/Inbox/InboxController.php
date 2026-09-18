@@ -75,7 +75,7 @@ class InboxController extends Controller
             'templates' => $templates,
             'selected' => $contact ? $this->conversationPayload($contact) : null,
             'filters' => $request->only('q'),
-            'poll_interval_ms' => (int) config('whatsapp.inbox.poll_interval_ms', 4000),
+            'poll_interval_ms' => (int) config('whatsapp.inbox.poll_interval_ms', 1500),
         ]);
     }
 

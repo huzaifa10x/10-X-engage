@@ -41,7 +41,7 @@ return [
     ],
 
     'inbox' => [
-        'poll_interval_ms' => (int) env('WHATSAPP_INBOX_POLL_MS', 4000),
+        'poll_interval_ms' => (int) env('WHATSAPP_INBOX_POLL_MS', 1500),
     ],
 
     'conversation' => [
