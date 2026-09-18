@@ -37,7 +37,7 @@ class ConversationGuard
             return;
         }
 
-        if ($contact->isWindowOpen()) {
+        if ($contact->reconcileWindow()->isWindowOpen()) {
             return;
         }
 

@@ -162,6 +162,19 @@ class InboxTest extends TestCase
         $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
     }
 
+    public function test_window_self_heals_from_recent_inbound_message(): void
+    {
+        $contact = $this->contact();
+        // inbound message stored by an outdated worker: no window, no summary
+        $contact->messages()->create(['workspace_id' => $contact->workspace_id, 'phone_number_id' => $this->phone->id, 'direction' => 'inbound', 'type' => 'text', 'status' => 'received', 'from' => $contact->wa_id, 'preview' => 'hello hello', 'wamid' => 'wamid.stale', 'received_at' => now()->subMinutes(10)]);
+
+        $this->actingAs($this->user)->get(route('inbox.show', $contact))->assertOk();
+        $this->assertTrue($contact->fresh()->isWindowOpen());
+        $this->assertSame('hello hello', $contact->fresh()->last_message_preview);
+
+        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
+    }
+
     public function test_rebuild_command_restores_window_from_messages(): void
     {
         $contact = $this->contact();

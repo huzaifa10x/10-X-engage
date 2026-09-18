@@ -1,0 +1,111 @@
+From 5d99996aaea45c76f9e48a94303b4beae3204305 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Fri, 18 Sep 2026 08:59:20 +0000
+Subject: [PATCH] Inbox: reconcile 24h window from latest inbound message on
+ open/poll/send
+
+---
+ .../Controllers/Inbox/InboxController.php     |  4 ++-
+ app/Models/Contact.php                        | 25 +++++++++++++++++++
+ app/Support/ConversationGuard.php             |  2 +-
+ tests/Feature/InboxTest.php                   | 13 ++++++++++
+ 4 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/app/Http/Controllers/Inbox/InboxController.php b/app/Http/Controllers/Inbox/InboxController.php
+index 74a8ae6..7c82252 100644
+--- a/app/Http/Controllers/Inbox/InboxController.php
++++ b/app/Http/Controllers/Inbox/InboxController.php
+@@ -40,7 +40,7 @@ public function show(Request $request, Contact $contact): Response
+     {
+         Gate::authorize('view', $contact);
+ 
+-        return $this->render($request, $contact);
++        return $this->render($request, $contact->reconcileWindow());
+     }
+ 
+     protected function render(Request $request, ?Contact $contact): Response
+@@ -97,6 +97,8 @@ public function messages(Request $request, Contact $contact): JsonResponse
+     {
+         Gate::authorize('view', $contact);
+ 
++        $contact->reconcileWindow();
++
+         $after = (int) $request->query('after', 0);
+         $since = $request->query('since') ? Carbon::parse($request->query('since')) : null;
+         $before = (int) $request->query('before', 0);
+diff --git a/app/Models/Contact.php b/app/Models/Contact.php
+index 918d48f..86d67a3 100644
+--- a/app/Models/Contact.php
++++ b/app/Models/Contact.php
+@@ -74,6 +74,31 @@ public function openWindow(string $openedBy, ?Carbon $from = null): void
+         ])->save();
+     }
+ 
++    /**
++     * Safety net: if the newest inbound message is younger than 24h but the stored window is older
++     * (e.g. the webhook was processed by an outdated worker), re-open it from that message.
++     */
++    public function reconcileWindow(): static
++    {
++        $lastInbound = $this->messages()
++            ->where('direction', Message::DIRECTION_INBOUND)
++            ->where(fn ($q) => $q->where('received_at', '>', now()->subHours(self::WINDOW_HOURS))->orWhere('created_at', '>', now()->subHours(self::WINDOW_HOURS)))
++            ->latest('id')
++            ->first();
++
++        if ($lastInbound) {
++            $at = $lastInbound->received_at ?? $lastInbound->created_at;
++            if ($this->window_expires_at === null || $this->window_expires_at->lt($at->copy()->addHours(self::WINDOW_HOURS))) {
++                $this->openWindow(self::OPENED_BY_INBOUND, $at);
++            }
++            if ($this->last_message_at === null) {
++                $this->touchConversation($this->messages()->latest('id')->first());
++            }
++        }
++
++        return $this;
++    }
++
+     public function windowState(): array
+     {
+         $open = $this->isWindowOpen();
+diff --git a/app/Support/ConversationGuard.php b/app/Support/ConversationGuard.php
+index 47a1770..61f21fd 100644
+--- a/app/Support/ConversationGuard.php
++++ b/app/Support/ConversationGuard.php
+@@ -37,7 +37,7 @@ public static function assertCanSend(Contact $contact, string $type, string $fie
+             return;
+         }
+ 
+-        if ($contact->isWindowOpen()) {
++        if ($contact->reconcileWindow()->isWindowOpen()) {
+             return;
+         }
+ 
+diff --git a/tests/Feature/InboxTest.php b/tests/Feature/InboxTest.php
+index 8603913..183094e 100644
+--- a/tests/Feature/InboxTest.php
++++ b/tests/Feature/InboxTest.php
+@@ -162,6 +162,19 @@ public function test_unsupported_inbound_message_still_opens_the_window(): void
+         $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
+     }
+ 
++    public function test_window_self_heals_from_recent_inbound_message(): void
++    {
++        $contact = $this->contact();
++        // inbound message stored by an outdated worker: no window, no summary
++        $contact->messages()->create(['workspace_id' => $contact->workspace_id, 'phone_number_id' => $this->phone->id, 'direction' => 'inbound', 'type' => 'text', 'status' => 'received', 'from' => $contact->wa_id, 'preview' => 'hello hello', 'wamid' => 'wamid.stale', 'received_at' => now()->subMinutes(10)]);
++
++        $this->actingAs($this->user)->get(route('inbox.show', $contact))->assertOk();
++        $this->assertTrue($contact->fresh()->isWindowOpen());
++        $this->assertSame('hello hello', $contact->fresh()->last_message_preview);
++
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])->assertOk();
++    }
++
+     public function test_rebuild_command_restores_window_from_messages(): void
+     {
+         $contact = $this->contact();
+-- 
+2.43.0
+

@@ -74,6 +74,31 @@ class Contact extends Model
         ])->save();
     }
 
+    /**
+     * Safety net: if the newest inbound message is younger than 24h but the stored window is older
+     * (e.g. the webhook was processed by an outdated worker), re-open it from that message.
+     */
+    public function reconcileWindow(): static
+    {
+        $lastInbound = $this->messages()
+            ->where('direction', Message::DIRECTION_INBOUND)
+            ->where(fn ($q) => $q->where('received_at', '>', now()->subHours(self::WINDOW_HOURS))->orWhere('created_at', '>', now()->subHours(self::WINDOW_HOURS)))
+            ->latest('id')
+            ->first();
+
+        if ($lastInbound) {
+            $at = $lastInbound->received_at ?? $lastInbound->created_at;
+            if ($this->window_expires_at === null || $this->window_expires_at->lt($at->copy()->addHours(self::WINDOW_HOURS))) {
+                $this->openWindow(self::OPENED_BY_INBOUND, $at);
+            }
+            if ($this->last_message_at === null) {
+                $this->touchConversation($this->messages()->latest('id')->first());
+            }
+        }
+
+        return $this;
+    }
+
     public function windowState(): array
     {
         $open = $this->isWindowOpen();

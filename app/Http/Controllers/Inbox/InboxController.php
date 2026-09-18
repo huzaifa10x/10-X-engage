@@ -40,7 +40,7 @@ class InboxController extends Controller
     {
         Gate::authorize('view', $contact);
 
-        return $this->render($request, $contact);
+        return $this->render($request, $contact->reconcileWindow());
     }
 
     protected function render(Request $request, ?Contact $contact): Response
@@ -96,6 +96,8 @@ class InboxController extends Controller
     public function messages(Request $request, Contact $contact): JsonResponse
     {
         Gate::authorize('view', $contact);
+
+        $contact->reconcileWindow();
 
         $after = (int) $request->query('after', 0);
         $since = $request->query('since') ? Carbon::parse($request->query('since')) : null;
