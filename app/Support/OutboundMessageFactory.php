@@ -84,7 +84,7 @@ class OutboundMessageFactory
 
         return [
             $builder->template($template->name, $template->language, $components),
-            'Template '.$template->name.': '.TemplatePayloadBuilder::summarize($template->components),
+            TemplateRenderer::summary($template, $components),
             $template,
         ];
     }

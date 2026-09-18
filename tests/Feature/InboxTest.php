@@ -90,6 +90,8 @@ class InboxTest extends TestCase
         $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'template', 'template' => ['id' => $template->id, 'body' => ['Ali']]])
             ->assertOk()
             ->assertJsonPath('message.status', 'accepted')
+            ->assertJsonPath('message.body.template.body', 'Hello Ali')
+            ->assertJsonPath('message.preview', 'Hello Ali')
             ->assertJsonPath('contact.window.open', true)
             ->assertJsonPath('contact.window.opened_by', 'template');
 

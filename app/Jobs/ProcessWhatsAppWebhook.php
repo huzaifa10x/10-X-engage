@@ -220,9 +220,16 @@ class ProcessWhatsAppWebhook implements ShouldQueue
             return;
         }
 
+        $eventName = strtoupper($value['event'] ?? '');
+        if (in_array($eventName, ['DELETED', 'PENDING_DELETION'], true)) {
+            $template->delete();
+
+            return;
+        }
+
         $template->update([
             'template_id' => (string) ($value['message_template_id'] ?? $template->template_id),
-            'status' => strtoupper($value['event'] ?? $template->status),
+            'status' => $eventName ?: $template->status,
             'rejected_reason' => $value['reason'] ?? null,
             'last_status_update_at' => now(),
         ]);

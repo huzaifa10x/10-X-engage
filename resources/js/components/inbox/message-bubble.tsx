@@ -49,7 +49,18 @@ function Content({ m }: { m: ChatMessage }) {
                 <p className="flex items-center gap-1 text-[11px] font-semibold tracking-wide text-[#2b4a08] uppercase">
                     <LayoutTemplate className="size-3" /> Template · {b.template.name}
                 </p>
-                <p className="text-sm whitespace-pre-wrap">{b.template.text?.replace(/^Template [^:]+: /, '')}</p>
+                {b.template.header && <p className="text-sm font-semibold">{b.template.header}</p>}
+                <p className="text-sm whitespace-pre-wrap">{b.template.body || m.preview}</p>
+                {b.template.footer && <p className="text-xs text-muted-foreground">{b.template.footer}</p>}
+                {b.template.buttons.length > 0 && (
+                    <div className="mt-1 -mx-1 border-t pt-1">
+                        {b.template.buttons.map((btn, i) => (
+                            <div key={i} className="py-1 text-center text-sm font-medium text-[#027eb5]">
+                                {btn.text}
+                            </div>
+                        ))}
+                    </div>
+                )}
             </div>
         );
     }

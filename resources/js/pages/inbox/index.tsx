@@ -6,7 +6,7 @@ import WindowBadge from '@/components/inbox/window-badge';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import AppLayout from '@/layouts/app-layout';
-import { formatDayLabel } from '@/lib/format';
+import { fillVariables, formatDayLabel } from '@/lib/format';
 import { http, HttpError } from '@/lib/http';
 import { cn } from '@/lib/utils';
 import { type BreadcrumbItem } from '@/types';
@@ -187,7 +187,7 @@ export default function Inbox({ conversations: initialConversations, phones, tem
 
     const sendTemplate = (input: TemplateInput) => {
         const t = templates.find((x) => String(x.id) === input.id);
-        return send({ type: 'template', template: input }, { type: 'template', preview: `Template ${t?.name ?? ''}`, body: { template: { name: t?.name ?? null, text: t?.components.find((c) => c.type === 'BODY')?.text ?? null } } });
+        return send({ type: 'template', template: input }, { type: 'template', preview: `Template ${t?.name ?? ''}`, body: { template: { name: t?.name ?? null, header: null, body: fillVariables(t?.components.find((c) => c.type === 'BODY')?.text ?? '', input.body), footer: null, buttons: [] } } });
     };
 
     const sendFile = async (file: File) => {

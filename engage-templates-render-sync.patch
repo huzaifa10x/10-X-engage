@@ -1,0 +1,470 @@
+From f3d8ab899c127f62178329ee5d5b9cb02e86fd52 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Fri, 18 Sep 2026 10:44:05 +0000
+Subject: [PATCH] Render template parameters in inbox, deletion-aware template
+ sync (hourly), sync command
+
+---
+ README.md                                     | 18 ++++
+ app/Actions/Templates/SyncTemplates.php       | 11 ++-
+ app/Console/Commands/SyncTemplatesCommand.php | 33 +++++++
+ .../Controllers/Inbox/InboxController.php     |  5 +-
+ app/Jobs/ProcessWhatsAppWebhook.php           |  9 +-
+ app/Support/OutboundMessageFactory.php        |  2 +-
+ app/Support/TemplateRenderer.php              | 98 +++++++++++++++++++
+ .../js/components/inbox/message-bubble.tsx    | 13 ++-
+ resources/js/pages/inbox/index.tsx            |  4 +-
+ resources/js/types/whatsapp.ts                |  2 +-
+ routes/console.php                            |  4 +
+ tests/Feature/InboxTest.php                   |  2 +
+ tests/Feature/TemplateSyncTest.php            | 39 ++++++++
+ tests/Unit/TemplateRendererTest.php           | 40 ++++++++
+ 14 files changed, 272 insertions(+), 8 deletions(-)
+ create mode 100644 app/Console/Commands/SyncTemplatesCommand.php
+ create mode 100644 app/Support/TemplateRenderer.php
+ create mode 100644 tests/Feature/TemplateSyncTest.php
+ create mode 100644 tests/Unit/TemplateRendererTest.php
+
+diff --git a/README.md b/README.md
+index 277cea3..7d1950f 100644
+--- a/README.md
++++ b/README.md
+@@ -129,6 +129,24 @@ ## 6b. Contacts, Inbox & the 24-hour window (Phase 2)
+   customer never replies to a template, a free-form message may still be rejected by Meta (error 131047); the inbox
+   shows that on the bubble.
+ 
++### Template sync & scheduler
++
++`php artisan engage:sync-templates` mirrors every WABA's templates and **removes** templates that Meta no longer
++returns (deleted in WhatsApp Manager) or reports as `DELETED`. It is scheduled hourly; add the Laravel scheduler
++cron on the server (every minute):
++
++```
++cd /path/to/public_html && /usr/bin/php artisan schedule:run >> /dev/null 2>&1
++```
++
++Template bubbles in the inbox render the parameters that were actually sent ("Hello Daniyal", not "Hello {{1}}")
++via `App\Support\TemplateRenderer`, reading `payload.template.components` of the stored message.
++
++### Profile pictures
++
++The Cloud API does not expose customers' profile photos (only `contacts[].profile.name`), so the inbox shows
++initials. A photo can be attached to a contact manually if needed.
++
+ ## 7. Webhooks
+ 
+ `GET /webhooks/whatsapp` handles the `hub.challenge` handshake; `POST /webhooks/whatsapp` validates
+diff --git a/app/Actions/Templates/SyncTemplates.php b/app/Actions/Templates/SyncTemplates.php
+index 55e43c1..5579386 100644
+--- a/app/Actions/Templates/SyncTemplates.php
++++ b/app/Actions/Templates/SyncTemplates.php
+@@ -11,16 +11,25 @@ class SyncTemplates
+ {
+     public function __construct(protected TemplateService $templates) {}
+ 
++    /** @return int number of templates now mirrored (deleted ones are removed locally) */
+     public function __invoke(WhatsAppAccount $account): int
+     {
+         $remote = $this->templates->for($account)->all($account->waba_id);
+         $count = 0;
++        $seen = [];
+ 
+         foreach ($remote as $t) {
+-            self::upsert($account, $t);
++            if (strtoupper($t['status'] ?? '') === 'DELETED') {
++                continue; // Meta keeps deleted templates in the list for a while; we drop them below
++            }
++            $seen[] = self::upsert($account, $t)->id;
+             $count++;
+         }
+ 
++        // Anything Meta no longer returns (deleted in WhatsApp Manager / via API) is removed here too.
++        // Messages keep their rows: messages.message_template_id is nullOnDelete.
++        MessageTemplate::where('whatsapp_account_id', $account->id)->whereNotIn('id', $seen)->delete();
++
+         if ($namespace = $this->templates->for($account)->namespace($account->waba_id)) {
+             $account->update(['message_template_namespace' => $namespace]);
+         }
+diff --git a/app/Console/Commands/SyncTemplatesCommand.php b/app/Console/Commands/SyncTemplatesCommand.php
+new file mode 100644
+index 0000000..a4e5ea4
+--- /dev/null
++++ b/app/Console/Commands/SyncTemplatesCommand.php
+@@ -0,0 +1,33 @@
++<?php
++
++namespace App\Console\Commands;
++
++use App\Actions\Templates\SyncTemplates;
++use App\Models\WhatsAppAccount;
++use Illuminate\Console\Command;
++
++class SyncTemplatesCommand extends Command
++{
++    protected $signature = 'engage:sync-templates {--account= : Only this whatsapp_accounts.id}';
++
++    protected $description = 'Mirror message templates from Meta for every connected WABA (removes templates deleted on Meta)';
++
++    public function handle(SyncTemplates $sync): int
++    {
++        $accounts = WhatsAppAccount::query()
++            ->whereNotNull('access_token')
++            ->when($this->option('account'), fn ($q, $id) => $q->where('id', $id))
++            ->get();
++
++        foreach ($accounts as $account) {
++            try {
++                $n = $sync($account);
++                $this->info("{$account->waba_id}: {$n} template(s) in sync");
++            } catch (\Throwable $e) {
++                $this->error("{$account->waba_id}: {$e->getMessage()}");
++            }
++        }
++
++        return self::SUCCESS;
++    }
++}
+diff --git a/app/Http/Controllers/Inbox/InboxController.php b/app/Http/Controllers/Inbox/InboxController.php
+index 7c82252..52b593d 100644
+--- a/app/Http/Controllers/Inbox/InboxController.php
++++ b/app/Http/Controllers/Inbox/InboxController.php
+@@ -14,6 +14,7 @@
+ use App\Services\Meta\MessagingService;
+ use App\Support\ConversationGuard;
+ use App\Support\OutboundMessageFactory;
++use App\Support\TemplateRenderer;
+ use Illuminate\Http\JsonResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Carbon;
+@@ -264,7 +265,9 @@ protected static function body(Message $m): array
+                 ],
+             ],
+             'location' => ['location' => $p['location'] ?? null],
+-            'template' => ['template' => ['name' => $p['template']['name'] ?? null, 'text' => $m->preview]],
++            'template' => ['template' => [
++                'name' => $p['template']['name'] ?? null,
++            ] + TemplateRenderer::render($m->template, $p['template']['components'] ?? [])],
+             'interactive' => ['interactive' => $p['interactive'] ?? null, 'text' => $m->preview],
+             'button' => ['text' => $p['button']['text'] ?? $m->preview],
+             'reaction' => ['text' => ($p['reaction']['emoji'] ?? '').' (reaction)'],
+diff --git a/app/Jobs/ProcessWhatsAppWebhook.php b/app/Jobs/ProcessWhatsAppWebhook.php
+index ab327f7..43ae8d2 100644
+--- a/app/Jobs/ProcessWhatsAppWebhook.php
++++ b/app/Jobs/ProcessWhatsAppWebhook.php
+@@ -220,9 +220,16 @@ protected function handleTemplateStatus(WebhookEvent $event, array $value): void
+             return;
+         }
+ 
++        $eventName = strtoupper($value['event'] ?? '');
++        if (in_array($eventName, ['DELETED', 'PENDING_DELETION'], true)) {
++            $template->delete();
++
++            return;
++        }
++
+         $template->update([
+             'template_id' => (string) ($value['message_template_id'] ?? $template->template_id),
+-            'status' => strtoupper($value['event'] ?? $template->status),
++            'status' => $eventName ?: $template->status,
+             'rejected_reason' => $value['reason'] ?? null,
+             'last_status_update_at' => now(),
+         ]);
+diff --git a/app/Support/OutboundMessageFactory.php b/app/Support/OutboundMessageFactory.php
+index 279748d..330ffd0 100644
+--- a/app/Support/OutboundMessageFactory.php
++++ b/app/Support/OutboundMessageFactory.php
+@@ -84,7 +84,7 @@ protected static function template(MessagePayloadBuilder $builder, array $input,
+ 
+         return [
+             $builder->template($template->name, $template->language, $components),
+-            'Template '.$template->name.': '.TemplatePayloadBuilder::summarize($template->components),
++            TemplateRenderer::summary($template, $components),
+             $template,
+         ];
+     }
+diff --git a/app/Support/TemplateRenderer.php b/app/Support/TemplateRenderer.php
+new file mode 100644
+index 0000000..dd21ebd
+--- /dev/null
++++ b/app/Support/TemplateRenderer.php
+@@ -0,0 +1,98 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\MessageTemplate;
++
++/**
++ * Renders a template with the parameters that were actually sent (from the Messages Object
++ * `template.components` array), so the inbox shows "Hello Daniyal" instead of "Hello {{1}}".
++ */
++class TemplateRenderer
++{
++    /**
++     * @param  array  $sentComponents  payload['template']['components'] (may be empty)
++     * @return array{header: ?string, body: string, footer: ?string, buttons: list<array{type:string,text:?string}>}
++     */
++    public static function render(?MessageTemplate $template, array $sentComponents = []): array
++    {
++        $components = $template?->components ?? [];
++        $params = self::parameters($sentComponents);
++
++        $header = null;
++        $body = '';
++        $footer = null;
++        $buttons = [];
++
++        foreach ($components as $c) {
++            switch (strtoupper($c['type'] ?? '')) {
++                case 'HEADER':
++                    $format = strtoupper($c['format'] ?? 'TEXT');
++                    $header = $format === 'TEXT' ? self::fill($c['text'] ?? '', $params['header']) : '['.ucfirst(strtolower($format)).']';
++                    break;
++                case 'BODY':
++                    $body = self::fill($c['text'] ?? '', $params['body']);
++                    break;
++                case 'FOOTER':
++                    $footer = $c['text'] ?? null;
++                    break;
++                case 'BUTTONS':
++                    foreach ($c['buttons'] ?? [] as $b) {
++                        $buttons[] = ['type' => $b['type'] ?? 'QUICK_REPLY', 'text' => $b['text'] ?? null];
++                    }
++                    break;
++            }
++        }
++
++        if ($template?->category === 'AUTHENTICATION' && $body === '') {
++            $body = ($params['body'][0] ?? '{{1}}').' is your verification code.';
++        }
++
++        return ['header' => $header, 'body' => $body, 'footer' => $footer, 'buttons' => $buttons];
++    }
++
++    /** One-line text for previews / conversation lists. */
++    public static function summary(?MessageTemplate $template, array $sentComponents = []): string
++    {
++        $r = self::render($template, $sentComponents);
++
++        return trim(($r['header'] ? $r['header'].' — ' : '').$r['body']);
++    }
++
++    /** Extract positional text parameters per component from what was sent to Meta. */
++    protected static function parameters(array $sentComponents): array
++    {
++        $out = ['header' => [], 'body' => []];
++
++        foreach ($sentComponents as $c) {
++            $type = strtolower($c['type'] ?? '');
++            if (! in_array($type, ['header', 'body'], true)) {
++                continue;
++            }
++            foreach ($c['parameters'] ?? [] as $p) {
++                $out[$type][] = match ($p['type'] ?? '') {
++                    'text' => (string) ($p['text'] ?? ''),
++                    'currency' => (string) ($p['currency']['fallback_value'] ?? ''),
++                    'date_time' => (string) ($p['date_time']['fallback_value'] ?? ''),
++                    default => '',
++                };
++            }
++        }
++
++        return $out;
++    }
++
++    /** Replace {{1}}, {{2}} … (and named {{name}} params in order) with the given values. */
++    public static function fill(string $text, array $values): string
++    {
++        $i = 0;
++
++        return preg_replace_callback('/\{\{\s*([^}]+?)\s*\}\}/', function ($m) use (&$i, $values) {
++            $key = $m[1];
++            $value = is_numeric($key) ? ($values[(int) $key - 1] ?? null) : ($values[$i] ?? null);
++            $i++;
++
++            return $value !== null && $value !== '' ? $value : $m[0];
++        }, $text);
++    }
++}
+diff --git a/resources/js/components/inbox/message-bubble.tsx b/resources/js/components/inbox/message-bubble.tsx
+index e5fc0f6..f72c39e 100644
+--- a/resources/js/components/inbox/message-bubble.tsx
++++ b/resources/js/components/inbox/message-bubble.tsx
+@@ -49,7 +49,18 @@ function Content({ m }: { m: ChatMessage }) {
+                 <p className="flex items-center gap-1 text-[11px] font-semibold tracking-wide text-[#2b4a08] uppercase">
+                     <LayoutTemplate className="size-3" /> Template · {b.template.name}
+                 </p>
+-                <p className="text-sm whitespace-pre-wrap">{b.template.text?.replace(/^Template [^:]+: /, '')}</p>
++                {b.template.header && <p className="text-sm font-semibold">{b.template.header}</p>}
++                <p className="text-sm whitespace-pre-wrap">{b.template.body || m.preview}</p>
++                {b.template.footer && <p className="text-xs text-muted-foreground">{b.template.footer}</p>}
++                {b.template.buttons.length > 0 && (
++                    <div className="mt-1 -mx-1 border-t pt-1">
++                        {b.template.buttons.map((btn, i) => (
++                            <div key={i} className="py-1 text-center text-sm font-medium text-[#027eb5]">
++                                {btn.text}
++                            </div>
++                        ))}
++                    </div>
++                )}
+             </div>
+         );
+     }
+diff --git a/resources/js/pages/inbox/index.tsx b/resources/js/pages/inbox/index.tsx
+index f7548cc..beaf7e8 100644
+--- a/resources/js/pages/inbox/index.tsx
++++ b/resources/js/pages/inbox/index.tsx
+@@ -6,7 +6,7 @@ import WindowBadge from '@/components/inbox/window-badge';
+ import { Button } from '@/components/ui/button';
+ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+ import AppLayout from '@/layouts/app-layout';
+-import { formatDayLabel } from '@/lib/format';
++import { fillVariables, formatDayLabel } from '@/lib/format';
+ import { http, HttpError } from '@/lib/http';
+ import { cn } from '@/lib/utils';
+ import { type BreadcrumbItem } from '@/types';
+@@ -187,7 +187,7 @@ export default function Inbox({ conversations: initialConversations, phones, tem
+ 
+     const sendTemplate = (input: TemplateInput) => {
+         const t = templates.find((x) => String(x.id) === input.id);
+-        return send({ type: 'template', template: input }, { type: 'template', preview: `Template ${t?.name ?? ''}`, body: { template: { name: t?.name ?? null, text: t?.components.find((c) => c.type === 'BODY')?.text ?? null } } });
++        return send({ type: 'template', template: input }, { type: 'template', preview: `Template ${t?.name ?? ''}`, body: { template: { name: t?.name ?? null, header: null, body: fillVariables(t?.components.find((c) => c.type === 'BODY')?.text ?? '', input.body), footer: null, buttons: [] } } });
+     };
+ 
+     const sendFile = async (file: File) => {
+diff --git a/resources/js/types/whatsapp.ts b/resources/js/types/whatsapp.ts
+index 7e1f869..322e927 100644
+--- a/resources/js/types/whatsapp.ts
++++ b/resources/js/types/whatsapp.ts
+@@ -143,7 +143,7 @@ export interface ChatMessage {
+         text?: string;
+         media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null };
+         location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
+-        template?: { name: string | null; text: string | null };
++        template?: { name: string | null; header: string | null; body: string; footer: string | null; buttons: { type: string; text: string | null }[] };
+         interactive?: Record<string, unknown> | null;
+         unsupported?: { kind: string | null; code: number | null; detail: string | null; hint: string };
+     };
+diff --git a/routes/console.php b/routes/console.php
+index 3c9adf1..6f392bf 100644
+--- a/routes/console.php
++++ b/routes/console.php
+@@ -2,7 +2,11 @@
+ 
+ use Illuminate\Foundation\Inspiring;
+ use Illuminate\Support\Facades\Artisan;
++use Illuminate\Support\Facades\Schedule;
+ 
+ Artisan::command('inspire', function () {
+     $this->comment(Inspiring::quote());
+ })->purpose('Display an inspiring quote');
++
++// Keep the local template list in step with Meta (approvals, quality changes, deletions).
++Schedule::command('engage:sync-templates')->hourly();
+diff --git a/tests/Feature/InboxTest.php b/tests/Feature/InboxTest.php
+index 183094e..4f16b12 100644
+--- a/tests/Feature/InboxTest.php
++++ b/tests/Feature/InboxTest.php
+@@ -90,6 +90,8 @@ public function test_template_is_allowed_and_opens_the_window(): void
+         $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'template', 'template' => ['id' => $template->id, 'body' => ['Ali']]])
+             ->assertOk()
+             ->assertJsonPath('message.status', 'accepted')
++            ->assertJsonPath('message.body.template.body', 'Hello Ali')
++            ->assertJsonPath('message.preview', 'Hello Ali')
+             ->assertJsonPath('contact.window.open', true)
+             ->assertJsonPath('contact.window.opened_by', 'template');
+ 
+diff --git a/tests/Feature/TemplateSyncTest.php b/tests/Feature/TemplateSyncTest.php
+new file mode 100644
+index 0000000..7ebcea8
+--- /dev/null
++++ b/tests/Feature/TemplateSyncTest.php
+@@ -0,0 +1,39 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Actions\Templates\SyncTemplates;
++use App\Models\MessageTemplate;
++use App\Models\WhatsAppAccount;
++use App\Models\Workspace;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\Http;
++use Tests\TestCase;
++
++class TemplateSyncTest extends TestCase
++{
++    use RefreshDatabase;
++
++    public function test_sync_removes_templates_deleted_on_meta(): void
++    {
++        $workspace = Workspace::create(['name' => 'W', 'slug' => 'w']);
++        $account = WhatsAppAccount::create(['workspace_id' => $workspace->id, 'waba_id' => '111', 'access_token' => 'T']);
++
++        MessageTemplate::create(['whatsapp_account_id' => $account->id, 'template_id' => '1', 'name' => 'keep_me', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'APPROVED', 'components' => []]);
++        MessageTemplate::create(['whatsapp_account_id' => $account->id, 'template_id' => '2', 'name' => 'gone', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'APPROVED', 'components' => []]);
++        MessageTemplate::create(['whatsapp_account_id' => $account->id, 'template_id' => '3', 'name' => 'soft_deleted', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'APPROVED', 'components' => []]);
++
++        Http::fake([
++            'graph.facebook.com/*/111/message_templates*' => Http::response(['data' => [
++                ['id' => '1', 'name' => 'keep_me', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'APPROVED', 'components' => [['type' => 'BODY', 'text' => 'hi']]],
++                ['id' => '3', 'name' => 'soft_deleted', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'DELETED', 'components' => []],
++                ['id' => '4', 'name' => 'brand_new', 'language' => 'en_US', 'category' => 'MARKETING', 'status' => 'PENDING', 'components' => []],
++            ]]),
++            'graph.facebook.com/*/111*' => Http::response(['message_template_namespace' => 'ns']),
++        ]);
++
++        app(SyncTemplates::class)($account);
++
++        $this->assertSame(['brand_new', 'keep_me'], MessageTemplate::orderBy('name')->pluck('name')->all());
++    }
++}
+diff --git a/tests/Unit/TemplateRendererTest.php b/tests/Unit/TemplateRendererTest.php
+new file mode 100644
+index 0000000..6ee2c7b
+--- /dev/null
++++ b/tests/Unit/TemplateRendererTest.php
+@@ -0,0 +1,40 @@
++<?php
++
++namespace Tests\Unit;
++
++use App\Models\MessageTemplate;
++use App\Support\TemplateRenderer;
++use PHPUnit\Framework\TestCase;
++
++class TemplateRendererTest extends TestCase
++{
++    public function test_fills_body_and_header_variables_from_sent_parameters(): void
++    {
++        $template = new MessageTemplate(['category' => 'UTILITY', 'components' => [
++            ['type' => 'HEADER', 'format' => 'TEXT', 'text' => 'Order {{1}}'],
++            ['type' => 'BODY', 'text' => 'Hello {{1}}, your order {{2}} has shipped.'],
++            ['type' => 'FOOTER', 'text' => 'Thanks'],
++            ['type' => 'BUTTONS', 'buttons' => [['type' => 'URL', 'text' => 'Track', 'url' => 'https://x/{{1}}']]],
++        ]]);
++
++        $sent = [
++            ['type' => 'header', 'parameters' => [['type' => 'text', 'text' => '#42']]],
++            ['type' => 'body', 'parameters' => [['type' => 'text', 'text' => 'Daniyal'], ['type' => 'text', 'text' => '#42']]],
++        ];
++
++        $r = TemplateRenderer::render($template, $sent);
++
++        $this->assertSame('Order #42', $r['header']);
++        $this->assertSame('Hello Daniyal, your order #42 has shipped.', $r['body']);
++        $this->assertSame('Thanks', $r['footer']);
++        $this->assertSame('Track', $r['buttons'][0]['text']);
++        $this->assertSame('Order #42 — Hello Daniyal, your order #42 has shipped.', TemplateRenderer::summary($template, $sent));
++    }
++
++    public function test_leaves_placeholders_when_no_parameters_were_sent(): void
++    {
++        $template = new MessageTemplate(['category' => 'MARKETING', 'components' => [['type' => 'BODY', 'text' => 'Hi {{1}}']]]);
++
++        $this->assertSame('Hi {{1}}', TemplateRenderer::render($template, [])['body']);
++    }
++}
+-- 
+2.43.0
+

@@ -129,6 +129,24 @@ to obtain `example.header_handle`. Status changes arrive via `message_template_s
   customer never replies to a template, a free-form message may still be rejected by Meta (error 131047); the inbox
   shows that on the bubble.
 
+### Template sync & scheduler
+
+`php artisan engage:sync-templates` mirrors every WABA's templates and **removes** templates that Meta no longer
+returns (deleted in WhatsApp Manager) or reports as `DELETED`. It is scheduled hourly; add the Laravel scheduler
+cron on the server (every minute):
+
+```
+cd /path/to/public_html && /usr/bin/php artisan schedule:run >> /dev/null 2>&1
+```
+
+Template bubbles in the inbox render the parameters that were actually sent ("Hello Daniyal", not "Hello {{1}}")
+via `App\Support\TemplateRenderer`, reading `payload.template.components` of the stored message.
+
+### Profile pictures
+
+The Cloud API does not expose customers' profile photos (only `contacts[].profile.name`), so the inbox shows
+initials. A photo can be attached to a contact manually if needed.
+
 ## 7. Webhooks
 
 `GET /webhooks/whatsapp` handles the `hub.challenge` handshake; `POST /webhooks/whatsapp` validates

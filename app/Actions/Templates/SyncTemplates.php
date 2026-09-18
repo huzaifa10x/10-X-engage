@@ -11,15 +11,24 @@ class SyncTemplates
 {
     public function __construct(protected TemplateService $templates) {}
 
+    /** @return int number of templates now mirrored (deleted ones are removed locally) */
     public function __invoke(WhatsAppAccount $account): int
     {
         $remote = $this->templates->for($account)->all($account->waba_id);
         $count = 0;
+        $seen = [];
 
         foreach ($remote as $t) {
-            self::upsert($account, $t);
+            if (strtoupper($t['status'] ?? '') === 'DELETED') {
+                continue; // Meta keeps deleted templates in the list for a while; we drop them below
+            }
+            $seen[] = self::upsert($account, $t)->id;
             $count++;
         }
+
+        // Anything Meta no longer returns (deleted in WhatsApp Manager / via API) is removed here too.
+        // Messages keep their rows: messages.message_template_id is nullOnDelete.
+        MessageTemplate::where('whatsapp_account_id', $account->id)->whereNotIn('id', $seen)->delete();
 
         if ($namespace = $this->templates->for($account)->namespace($account->waba_id)) {
             $account->update(['message_template_namespace' => $namespace]);

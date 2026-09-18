@@ -14,6 +14,7 @@ use App\Models\PhoneNumber;
 use App\Services\Meta\MessagingService;
 use App\Support\ConversationGuard;
 use App\Support\OutboundMessageFactory;
+use App\Support\TemplateRenderer;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -264,7 +265,9 @@ class InboxController extends Controller
                 ],
             ],
             'location' => ['location' => $p['location'] ?? null],
-            'template' => ['template' => ['name' => $p['template']['name'] ?? null, 'text' => $m->preview]],
+            'template' => ['template' => [
+                'name' => $p['template']['name'] ?? null,
+            ] + TemplateRenderer::render($m->template, $p['template']['components'] ?? [])],
             'interactive' => ['interactive' => $p['interactive'] ?? null, 'text' => $m->preview],
             'button' => ['text' => $p['button']['text'] ?? $m->preview],
             'reaction' => ['text' => ($p['reaction']['emoji'] ?? '').' (reaction)'],

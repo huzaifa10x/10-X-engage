@@ -143,7 +143,7 @@ export interface ChatMessage {
         text?: string;
         media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null };
         location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
-        template?: { name: string | null; text: string | null };
+        template?: { name: string | null; header: string | null; body: string; footer: string | null; buttons: { type: string; text: string | null }[] };
         interactive?: Record<string, unknown> | null;
         unsupported?: { kind: string | null; code: number | null; detail: string | null; hint: string };
     };
