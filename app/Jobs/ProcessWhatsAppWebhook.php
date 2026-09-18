@@ -88,9 +88,19 @@ class ProcessWhatsAppWebhook implements ShouldQueue
             $contact = Contact::firstOrCreate(['workspace_id' => $workspaceId, 'wa_id' => $waId]);
 
             $profileName = $profiles[$waId]['profile']['name'] ?? null;
-            $contact->update(array_filter(['name' => $profileName, 'last_inbound_at' => now()]));
+            $contact->update(array_filter([
+                'name' => $contact->name ?: $profileName,          // never overwrite a name the admin typed
+                'phone' => $contact->phone ?: '+'.$waId,
+                'source' => $contact->wasRecentlyCreated ? 'inbound' : null,
+                'last_inbound_at' => now(),
+            ]));
+            if ($contact->wasRecentlyCreated) {
+                $contact->forceFill(['meta' => ['profile_name' => $profileName]])->save();
+            }
 
-            Message::firstOrCreate(
+            $receivedAt = isset($incoming['timestamp']) ? Carbon::createFromTimestamp((int) $incoming['timestamp']) : now();
+
+            $message = Message::firstOrCreate(
                 ['wamid' => $incoming['id']],
                 [
                     'workspace_id' => $workspaceId,
@@ -104,11 +114,18 @@ class ProcessWhatsAppWebhook implements ShouldQueue
                     'context_wamid' => $incoming['context']['id'] ?? null,
                     'preview' => $this->inboundPreview($incoming),
                     'payload' => $incoming,
-                    'received_at' => isset($incoming['timestamp']) ? Carbon::createFromTimestamp((int) $incoming['timestamp']) : now(),
+                    'received_at' => $receivedAt,
                     'error_code' => $incoming['errors'][0]['code'] ?? null,
                     'error_title' => $incoming['errors'][0]['title'] ?? null,
                 ]
             );
+
+            if ($message->wasRecentlyCreated) {
+                // A customer message (re)opens the 24-hour customer-service window.
+                $contact->openWindow(Contact::OPENED_BY_INBOUND, $receivedAt);
+                $contact->increment('unread_count');
+                $contact->touchConversation($message);
+            }
         }
     }
 

@@ -4,15 +4,17 @@ import { NavUser } from '@/components/nav-user';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { type NavItem } from '@/types';
 import { Link } from '@inertiajs/react';
-import { BookOpen, Building2, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap } from 'lucide-react';
+import { BookOpen, Building2, Inbox, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap, Users } from 'lucide-react';
 import AppLogo from './app-logo';
 
 const mainNavItems: NavItem[] = [
     { title: 'Dashboard', url: '/dashboard', icon: LayoutGrid },
-    { title: 'Onboarding', url: '/onboarding', icon: PlugZap },
-    { title: 'Accounts', url: '/accounts', icon: Building2 },
-    { title: 'Messages', url: '/messages', icon: MessageSquareText },
+    { title: 'Inbox', url: '/inbox', icon: Inbox },
+    { title: 'Contacts', url: '/contacts', icon: Users },
     { title: 'Templates', url: '/templates', icon: LayoutTemplate },
+    { title: 'Message log', url: '/messages', icon: MessageSquareText },
+    { title: 'Accounts', url: '/accounts', icon: Building2 },
+    { title: 'Onboarding', url: '/onboarding', icon: PlugZap },
 ];
 
 const footerNavItems: NavItem[] = [

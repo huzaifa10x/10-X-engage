@@ -108,6 +108,27 @@ Media uploads use `POST /{Phone-Number-ID}/media` (multipart, `messaging_product
 to obtain `example.header_handle`. Status changes arrive via `message_template_status_update`; you can also
 *Sync from Meta* (`GET /{WABA-ID}/message_templates`) or refresh one template (`GET /{TEMPLATE_ID}`).
 
+## 6b. Contacts, Inbox & the 24-hour window (Phase 2)
+
+- **Contacts** (`/contacts`) – full CRUD (name, WhatsApp number, email, company, tags, notes, preferred sender).
+  A number must exist as a contact before it can be messaged. Inbound messages from unknown numbers create the
+  contact automatically (`source = inbound`, name from the WhatsApp profile).
+- **Inbox** (`/inbox`) – WhatsApp-style two-pane chat: conversation list with unread counters and window status,
+  bubbles with sent/delivered/read ticks, day separators, reply-to, media attachments and a template dialog.
+  Live updates use polling of two JSON endpoints (`GET /inbox/conversations`, `GET /inbox/{contact}/messages?after=&since=`)
+  every `WHATSAPP_INBOX_POLL_MS` (default 4000 ms), which works on shared hosting without websockets. Opening a chat
+  clears the unread counter and sends a read receipt (`PUT /{Phone}/messages status=read`).
+- **24-hour window** – enforced server-side by `App\Support\ConversationGuard` for both the inbox and the composer:
+  - the first message to a contact must be an approved template;
+  - a customer message opens/extends the window for 24 h (`window_opened_by = inbound`);
+  - a successfully sent template also opens it (`window_opened_by = template`, toggle `WHATSAPP_TEMPLATE_OPENS_WINDOW`);
+  - once expired, free-form sends are rejected with “24-hour window has been closed…” and the composer shows the
+    template-only state until another template is sent or the customer writes again.
+
+  Meta note: WhatsApp itself only guarantees free-form delivery inside a *customer-initiated* service window. If the
+  customer never replies to a template, a free-form message may still be rejected by Meta (error 131047); the inbox
+  shows that on the bubble.
+
 ## 7. Webhooks
 
 `GET /webhooks/whatsapp` handles the `hub.challenge` handshake; `POST /webhooks/whatsapp` validates
@@ -130,7 +151,8 @@ app/
   Policies/           Workspace scoping
 config/whatsapp.php   All Meta settings
 database/migrations/  Schema (see file headers)
-resources/js/pages/   onboarding/, accounts/, messages/, templates/, dashboard
+resources/js/pages/   onboarding/, accounts/, contacts/, inbox/, messages/, templates/, dashboard
+resources/js/components/inbox/  conversation list, bubbles, composer, template dialog, window badge
 resources/js/hooks/use-embedded-signup.ts   FB SDK + session logging + FB.login
 tests/                Unit tests for both payload builders; feature tests for onboarding, registration, webhooks
 ```

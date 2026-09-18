@@ -30,3 +30,43 @@ export function fillVariables(text: string, values: string[]): string {
         return v && v.trim() !== '' ? v : `{{${n}}}`;
     });
 }
+
+export function formatTime(value?: string | null): string {
+    if (!value) return '';
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** "Today", "Yesterday" or a date — used for chat day separators. */
+export function formatDayLabel(value: string): string {
+    const d = new Date(value);
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(today.getDate() - 1);
+    const same = (a: Date, b: Date) => a.toDateString() === b.toDateString();
+    if (same(d, today)) return 'Today';
+    if (same(d, yesterday)) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
+}
+
+/** "5h 12m" style countdown from seconds. */
+export function formatCountdown(seconds: number): string {
+    if (seconds <= 0) return '0m';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m`;
+    return `${seconds}s`;
+}
+
+/** Relative time for conversation lists: "12:40", "Yesterday", "Mon", "3 Sep". */
+export function formatListTime(value?: string | null): string {
+    if (!value) return '';
+    const d = new Date(value);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) return formatTime(value);
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
+    if (diffDays < 1) return 'Yesterday';
+    if (diffDays < 7) return d.toLocaleDateString(undefined, { weekday: 'short' });
+    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+}

@@ -101,3 +101,78 @@ export interface MessageRow {
     received_at: string | null;
     created_at: string | null;
 }
+
+/* Contacts & inbox --------------------------------------------------------- */
+
+export interface WindowState {
+    open: boolean;
+    expires_at: string | null;
+    opened_by: 'inbound' | 'template' | null;
+    seconds_left: number;
+    has_history: boolean;
+}
+
+export interface ContactRow {
+    id: number;
+    wa_id: string;
+    phone: string;
+    name: string | null;
+    display_name: string;
+    initials: string;
+    email: string | null;
+    company: string | null;
+    tags: string[];
+    source: string;
+    sender: string | null;
+    unread_count: number;
+    last_message_at: string | null;
+    last_message_preview: string | null;
+    last_message_direction: 'inbound' | 'outbound' | null;
+    window: WindowState;
+    created_at: string | null;
+}
+
+export interface ChatMessage {
+    id: number;
+    wamid: string | null;
+    direction: 'inbound' | 'outbound';
+    type: string;
+    status: string;
+    preview: string | null;
+    body: {
+        text?: string;
+        media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null };
+        location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
+        template?: { name: string | null; text: string | null };
+        interactive?: Record<string, unknown> | null;
+    };
+    context_wamid: string | null;
+    template_id: number | null;
+    error_code: number | null;
+    error_message: string | null;
+    sent_at: string | null;
+    delivered_at: string | null;
+    read_at: string | null;
+    failed_at: string | null;
+    timestamp: string | null;
+    updated_at: string | null;
+    /** client-only: optimistic bubble not yet confirmed by the server */
+    pending?: boolean;
+}
+
+export interface InboxPhone {
+    id: number;
+    account_id: number;
+    display_phone_number: string | null;
+    verified_name: string | null;
+    is_default: boolean;
+}
+
+export interface InboxTemplate {
+    id: number;
+    account_id: number;
+    name: string;
+    language: string;
+    category: string;
+    components: TemplateComponent[];
+}

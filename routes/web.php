@@ -1,6 +1,8 @@
 <?php
 
+use App\Http\Controllers\Contacts\ContactController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\Inbox\InboxController;
 use App\Http\Controllers\Messaging\MediaController;
 use App\Http\Controllers\Messaging\MessageController;
 use App\Http\Controllers\Onboarding\EmbeddedSignupController;
@@ -65,6 +67,26 @@ Route::middleware(['auth'])->group(function () {
         Route::post('{phone}/verify-code', [PhoneNumberController::class, 'verifyCode'])->name('verify-code');
         Route::post('{phone}/pin', [PhoneNumberController::class, 'updatePin'])->name('pin');
         Route::post('{phone}/default', [PhoneNumberController::class, 'setDefault'])->name('default');
+    });
+
+    /* Contacts -------------------------------------------------------------- */
+    Route::prefix('contacts')->name('contacts.')->group(function () {
+        Route::get('/', [ContactController::class, 'index'])->name('index');
+        Route::get('create', [ContactController::class, 'create'])->name('create');
+        Route::post('/', [ContactController::class, 'store'])->name('store');
+        Route::get('{contact}/edit', [ContactController::class, 'edit'])->name('edit');
+        Route::put('{contact}', [ContactController::class, 'update'])->name('update');
+        Route::delete('{contact}', [ContactController::class, 'destroy'])->name('destroy');
+    });
+
+    /* Inbox (WhatsApp-style chat) ------------------------------------------- */
+    Route::prefix('inbox')->name('inbox.')->group(function () {
+        Route::get('/', [InboxController::class, 'index'])->name('index');
+        Route::get('conversations', [InboxController::class, 'conversations'])->name('conversations');
+        Route::get('{contact}', [InboxController::class, 'show'])->name('show');
+        Route::get('{contact}/messages', [InboxController::class, 'messages'])->name('messages');
+        Route::post('{contact}/messages', [InboxController::class, 'send'])->name('send');
+        Route::post('{contact}/read', [InboxController::class, 'markRead'])->name('read');
     });
 
     /* Messaging ------------------------------------------------------------ */

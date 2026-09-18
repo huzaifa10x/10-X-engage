@@ -1,0 +1,2991 @@
+From 9f53d612ac7adf5545a311777ce22951aeb1e05d Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Fri, 18 Sep 2026 07:00:54 +0000
+Subject: [PATCH] Phase 2: Contacts CRUD, WhatsApp-style inbox with live
+ polling, 24-hour conversation window enforcement
+
+---
+ .env.example                                  |   2 +
+ README.md                                     |  24 +-
+ app/Actions/Messaging/SendMessage.php         |  10 +-
+ .../Contacts/ContactController.php            | 124 ++++++
+ .../Controllers/Inbox/InboxController.php     | 272 +++++++++++++
+ .../Messaging/MessageController.php           |  77 +---
+ app/Http/Requests/ContactRequest.php          |  55 +++
+ app/Http/Requests/InboxSendRequest.php        |  47 +++
+ app/Jobs/ProcessWhatsAppWebhook.php           |  23 +-
+ app/Models/Contact.php                        | 113 +++++-
+ app/Policies/ContactPolicy.php                |  24 ++
+ app/Providers/AppServiceProvider.php          |   3 +
+ app/Support/ConversationGuard.php             |  48 +++
+ app/Support/OutboundMessageFactory.php        |  91 +++++
+ config/whatsapp.php                           |  11 +
+ ..._conversation_fields_to_contacts_table.php |  43 +++
+ resources/js/components/app-sidebar.tsx       |  10 +-
+ resources/js/components/inbox/composer.tsx    |  96 +++++
+ .../js/components/inbox/conversation-list.tsx |  64 ++++
+ .../js/components/inbox/message-bubble.tsx    |  76 ++++
+ .../js/components/inbox/status-ticks.tsx      |  11 +
+ .../js/components/inbox/template-dialog.tsx   | 167 ++++++++
+ .../js/components/inbox/window-badge.tsx      |  21 +
+ resources/js/lib/format.ts                    |  40 ++
+ resources/js/lib/http.ts                      |  32 ++
+ resources/js/pages/contacts/form.tsx          | 167 ++++++++
+ resources/js/pages/contacts/index.tsx         | 188 +++++++++
+ resources/js/pages/inbox/index.tsx            | 359 ++++++++++++++++++
+ resources/js/pages/messages/create.tsx        |  56 ++-
+ resources/js/types/whatsapp.ts                |  75 ++++
+ routes/web.php                                |  22 ++
+ tests/Feature/InboxTest.php                   | 167 ++++++++
+ tests/Feature/SendMessageTest.php             |   2 +
+ 33 files changed, 2439 insertions(+), 81 deletions(-)
+ create mode 100644 app/Http/Controllers/Contacts/ContactController.php
+ create mode 100644 app/Http/Controllers/Inbox/InboxController.php
+ create mode 100644 app/Http/Requests/ContactRequest.php
+ create mode 100644 app/Http/Requests/InboxSendRequest.php
+ create mode 100644 app/Policies/ContactPolicy.php
+ create mode 100644 app/Support/ConversationGuard.php
+ create mode 100644 app/Support/OutboundMessageFactory.php
+ create mode 100644 database/migrations/2026_09_18_000001_add_conversation_fields_to_contacts_table.php
+ create mode 100644 resources/js/components/inbox/composer.tsx
+ create mode 100644 resources/js/components/inbox/conversation-list.tsx
+ create mode 100644 resources/js/components/inbox/message-bubble.tsx
+ create mode 100644 resources/js/components/inbox/status-ticks.tsx
+ create mode 100644 resources/js/components/inbox/template-dialog.tsx
+ create mode 100644 resources/js/components/inbox/window-badge.tsx
+ create mode 100644 resources/js/lib/http.ts
+ create mode 100644 resources/js/pages/contacts/form.tsx
+ create mode 100644 resources/js/pages/contacts/index.tsx
+ create mode 100644 resources/js/pages/inbox/index.tsx
+ create mode 100644 tests/Feature/InboxTest.php
+
+diff --git a/.env.example b/.env.example
+index b84f512..2128137 100644
+--- a/.env.example
++++ b/.env.example
+@@ -93,6 +93,8 @@ WHATSAPP_SYSTEM_USER_ID=
+ WHATSAPP_PARTNER_TYPE=tech_provider
+ # Auto-call POST /{Phone-Number-ID}/register at the end of Embedded Signup with a generated PIN
+ WHATSAPP_AUTO_REGISTER=true
++# Sending an approved template opens the 24-hour free-form window in the inbox (see config/whatsapp.php)
++WHATSAPP_TEMPLATE_OPENS_WINDOW=true
+ WHATSAPP_CREDIT_LINE_ID=
+ WHATSAPP_DEFAULT_WABA_CURRENCY=USD
+ 
+diff --git a/README.md b/README.md
+index 782ccb7..277cea3 100644
+--- a/README.md
++++ b/README.md
+@@ -108,6 +108,27 @@ ## 6. Templates
+ to obtain `example.header_handle`. Status changes arrive via `message_template_status_update`; you can also
+ *Sync from Meta* (`GET /{WABA-ID}/message_templates`) or refresh one template (`GET /{TEMPLATE_ID}`).
+ 
++## 6b. Contacts, Inbox & the 24-hour window (Phase 2)
++
++- **Contacts** (`/contacts`) – full CRUD (name, WhatsApp number, email, company, tags, notes, preferred sender).
++  A number must exist as a contact before it can be messaged. Inbound messages from unknown numbers create the
++  contact automatically (`source = inbound`, name from the WhatsApp profile).
++- **Inbox** (`/inbox`) – WhatsApp-style two-pane chat: conversation list with unread counters and window status,
++  bubbles with sent/delivered/read ticks, day separators, reply-to, media attachments and a template dialog.
++  Live updates use polling of two JSON endpoints (`GET /inbox/conversations`, `GET /inbox/{contact}/messages?after=&since=`)
++  every `WHATSAPP_INBOX_POLL_MS` (default 4000 ms), which works on shared hosting without websockets. Opening a chat
++  clears the unread counter and sends a read receipt (`PUT /{Phone}/messages status=read`).
++- **24-hour window** – enforced server-side by `App\Support\ConversationGuard` for both the inbox and the composer:
++  - the first message to a contact must be an approved template;
++  - a customer message opens/extends the window for 24 h (`window_opened_by = inbound`);
++  - a successfully sent template also opens it (`window_opened_by = template`, toggle `WHATSAPP_TEMPLATE_OPENS_WINDOW`);
++  - once expired, free-form sends are rejected with “24-hour window has been closed…” and the composer shows the
++    template-only state until another template is sent or the customer writes again.
++
++  Meta note: WhatsApp itself only guarantees free-form delivery inside a *customer-initiated* service window. If the
++  customer never replies to a template, a free-form message may still be rejected by Meta (error 131047); the inbox
++  shows that on the bubble.
++
+ ## 7. Webhooks
+ 
+ `GET /webhooks/whatsapp` handles the `hub.challenge` handshake; `POST /webhooks/whatsapp` validates
+@@ -130,7 +151,8 @@ ## 8. Project layout
+   Policies/           Workspace scoping
+ config/whatsapp.php   All Meta settings
+ database/migrations/  Schema (see file headers)
+-resources/js/pages/   onboarding/, accounts/, messages/, templates/, dashboard
++resources/js/pages/   onboarding/, accounts/, contacts/, inbox/, messages/, templates/, dashboard
++resources/js/components/inbox/  conversation list, bubbles, composer, template dialog, window badge
+ resources/js/hooks/use-embedded-signup.ts   FB SDK + session logging + FB.login
+ tests/                Unit tests for both payload builders; feature tests for onboarding, registration, webhooks
+ ```
+diff --git a/app/Actions/Messaging/SendMessage.php b/app/Actions/Messaging/SendMessage.php
+index 3c62a52..bd10ccb 100644
+--- a/app/Actions/Messaging/SendMessage.php
++++ b/app/Actions/Messaging/SendMessage.php
+@@ -18,12 +18,13 @@ class SendMessage
+ {
+     public function __construct(protected MessagingService $messaging) {}
+ 
+-    public function __invoke(User $user, PhoneNumber $phone, array $payload, ?string $preview = null, ?MessageTemplate $template = null): Message
++    public function __invoke(User $user, PhoneNumber $phone, array $payload, ?string $preview = null, ?MessageTemplate $template = null, ?Contact $contact = null): Message
+     {
+         $waId = Contact::normalizeWaId($payload['to']);
+ 
+-        $contact = Contact::firstOrCreate(
++        $contact ??= Contact::firstOrCreate(
+             ['workspace_id' => $user->workspace_id, 'wa_id' => $waId],
++            ['phone' => '+'.$waId, 'source' => 'outbound', 'created_by' => $user->id],
+         );
+ 
+         $message = Message::create([
+@@ -60,6 +61,11 @@ public function __invoke(User $user, PhoneNumber $phone, array $payload, ?string
+             }
+ 
+             $contact->update(['last_outbound_at' => now()]);
++            $contact->touchConversation($message);
++
++            if ($template && config('whatsapp.conversation.template_opens_window')) {
++                $contact->openWindow(Contact::OPENED_BY_TEMPLATE);
++            }
+         } catch (GraphApiException $e) {
+             $message->forceFill([
+                 'status' => 'failed',
+diff --git a/app/Http/Controllers/Contacts/ContactController.php b/app/Http/Controllers/Contacts/ContactController.php
+new file mode 100644
+index 0000000..d16cb1f
+--- /dev/null
++++ b/app/Http/Controllers/Contacts/ContactController.php
+@@ -0,0 +1,124 @@
++<?php
++
++namespace App\Http\Controllers\Contacts;
++
++use App\Http\Controllers\Controller;
++use App\Http\Requests\ContactRequest;
++use App\Models\Contact;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Facades\Gate;
++use Inertia\Inertia;
++use Inertia\Response;
++
++class ContactController extends Controller
++{
++    public function index(Request $request): Response
++    {
++        $workspace = $request->user()->workspace;
++
++        $query = $workspace->contacts()->with('phoneNumber:id,display_phone_number')->search($request->query('q'));
++
++        match ($request->query('window')) {
++            'open' => $query->where('window_expires_at', '>', now()),
++            'closed' => $query->where(fn ($q) => $q->whereNull('window_expires_at')->orWhere('window_expires_at', '<=', now())),
++            default => null,
++        };
++        if ($tag = $request->query('tag')) {
++            $query->whereJsonContains('tags', $tag);
++        }
++
++        $contacts = $query->orderByDesc('last_message_at')->orderBy('name')->paginate(25)->withQueryString()
++            ->through(fn (Contact $c) => self::row($c));
++
++        $tags = $workspace->contacts()->whereNotNull('tags')->pluck('tags')->flatten()->unique()->sort()->values();
++
++        return Inertia::render('contacts/index', [
++            'contacts' => $contacts,
++            'filters' => $request->only('q', 'window', 'tag'),
++            'tags' => $tags,
++            'stats' => [
++                'total' => $workspace->contacts()->count(),
++                'open_windows' => $workspace->contacts()->where('window_expires_at', '>', now())->count(),
++                'unread' => (int) $workspace->contacts()->sum('unread_count'),
++            ],
++        ]);
++    }
++
++    public function create(Request $request): Response
++    {
++        return Inertia::render('contacts/form', [
++            'contact' => null,
++            'phones' => $this->phones($request),
++        ]);
++    }
++
++    public function store(ContactRequest $request): RedirectResponse
++    {
++        $contact = $request->user()->workspace->contacts()->create($request->validated() + [
++            'source' => 'manual',
++            'created_by' => $request->user()->id,
++        ]);
++
++        return redirect()->route('inbox.show', $contact)->with('success', "Contact {$contact->name} created. Start the conversation with a template.");
++    }
++
++    public function edit(Request $request, Contact $contact): Response
++    {
++        Gate::authorize('update', $contact);
++
++        return Inertia::render('contacts/form', [
++            'contact' => self::row($contact) + ['email' => $contact->email, 'company' => $contact->company, 'notes' => $contact->notes, 'phone_number_id' => $contact->phone_number_id],
++            'phones' => $this->phones($request),
++        ]);
++    }
++
++    public function update(ContactRequest $request, Contact $contact): RedirectResponse
++    {
++        Gate::authorize('update', $contact);
++
++        $contact->update($request->validated());
++
++        return redirect()->route('contacts.index')->with('success', 'Contact updated.');
++    }
++
++    public function destroy(Request $request, Contact $contact): RedirectResponse
++    {
++        Gate::authorize('delete', $contact);
++
++        $contact->delete(); // messages keep their rows (contact_id -> null)
++
++        return redirect()->route('contacts.index')->with('success', 'Contact deleted.');
++    }
++
++    protected function phones(Request $request): array
++    {
++        return $request->user()->workspace->phoneNumbers()->where('is_registered', true)
++            ->get(['phone_numbers.id', 'display_phone_number', 'verified_name'])
++            ->map(fn ($p) => ['id' => $p->id, 'label' => trim($p->display_phone_number.' · '.$p->verified_name, ' ·')])
++            ->all();
++    }
++
++    public static function row(Contact $c): array
++    {
++        return [
++            'id' => $c->id,
++            'wa_id' => $c->wa_id,
++            'phone' => $c->phone ?? '+'.$c->wa_id,
++            'name' => $c->name,
++            'display_name' => $c->displayName(),
++            'initials' => $c->initials(),
++            'email' => $c->email,
++            'company' => $c->company,
++            'tags' => $c->tags ?? [],
++            'source' => $c->source,
++            'sender' => $c->relationLoaded('phoneNumber') && $c->phoneNumber ? $c->phoneNumber->display_phone_number : null,
++            'unread_count' => $c->unread_count,
++            'last_message_at' => $c->last_message_at?->toIso8601String(),
++            'last_message_preview' => $c->last_message_preview,
++            'last_message_direction' => $c->last_message_direction,
++            'window' => $c->windowState(),
++            'created_at' => $c->created_at?->toIso8601String(),
++        ];
++    }
++}
+diff --git a/app/Http/Controllers/Inbox/InboxController.php b/app/Http/Controllers/Inbox/InboxController.php
+new file mode 100644
+index 0000000..7e1024f
+--- /dev/null
++++ b/app/Http/Controllers/Inbox/InboxController.php
+@@ -0,0 +1,272 @@
++<?php
++
++namespace App\Http\Controllers\Inbox;
++
++use App\Actions\Messaging\SendMessage;
++use App\Exceptions\GraphApiException;
++use App\Http\Controllers\Contacts\ContactController;
++use App\Http\Controllers\Controller;
++use App\Http\Requests\InboxSendRequest;
++use App\Models\Contact;
++use App\Models\Message;
++use App\Models\MessageTemplate;
++use App\Models\PhoneNumber;
++use App\Services\Meta\MessagingService;
++use App\Support\ConversationGuard;
++use App\Support\OutboundMessageFactory;
++use Illuminate\Http\JsonResponse;
++use Illuminate\Http\Request;
++use Illuminate\Support\Carbon;
++use Illuminate\Support\Facades\Gate;
++use Illuminate\Support\Facades\Log;
++use Illuminate\Validation\ValidationException;
++use Inertia\Inertia;
++use Inertia\Response;
++
++/**
++ * WhatsApp-style two-pane inbox. The page is rendered once with Inertia; afterwards the
++ * client polls the JSON endpoints below (conversations / messages) for live updates.
++ */
++class InboxController extends Controller
++{
++    public const PAGE_SIZE = 50;
++
++    public function index(Request $request): Response
++    {
++        return $this->render($request, null);
++    }
++
++    public function show(Request $request, Contact $contact): Response
++    {
++        Gate::authorize('view', $contact);
++
++        return $this->render($request, $contact);
++    }
++
++    protected function render(Request $request, ?Contact $contact): Response
++    {
++        $workspace = $request->user()->workspace;
++
++        $phones = $workspace->phoneNumbers()->where('is_registered', true)->with('account:id,name')
++            ->get()
++            ->map(fn (PhoneNumber $p) => [
++                'id' => $p->id,
++                'account_id' => $p->whatsapp_account_id,
++                'display_phone_number' => $p->display_phone_number,
++                'verified_name' => $p->verified_name,
++                'is_default' => $p->is_default,
++            ])->values();
++
++        $templates = MessageTemplate::whereIn('whatsapp_account_id', $workspace->whatsappAccounts()->pluck('id'))
++            ->where('status', 'APPROVED')->orderBy('name')->get()
++            ->map(fn (MessageTemplate $t) => [
++                'id' => $t->id,
++                'account_id' => $t->whatsapp_account_id,
++                'name' => $t->name,
++                'language' => $t->language,
++                'category' => $t->category,
++                'components' => $t->components,
++            ])->values();
++
++        return Inertia::render('inbox/index', [
++            'conversations' => $this->conversationList($workspace->id, $request->query('q')),
++            'phones' => $phones,
++            'templates' => $templates,
++            'selected' => $contact ? $this->conversationPayload($contact) : null,
++            'filters' => $request->only('q'),
++            'poll_interval_ms' => (int) config('whatsapp.inbox.poll_interval_ms', 4000),
++        ]);
++    }
++
++    /* JSON: live updates ----------------------------------------------------- */
++
++    /** Conversation list (left pane). */
++    public function conversations(Request $request): JsonResponse
++    {
++        return response()->json([
++            'conversations' => $this->conversationList($request->user()->workspace_id, $request->query('q')),
++            'server_time' => now()->toIso8601String(),
++        ]);
++    }
++
++    /**
++     * Messages for one contact. With ?after=<id> only newer messages are returned; with ?since=<iso>
++     * messages whose status changed since then are returned too, so ticks update live.
++     */
++    public function messages(Request $request, Contact $contact): JsonResponse
++    {
++        Gate::authorize('view', $contact);
++
++        $after = (int) $request->query('after', 0);
++        $since = $request->query('since') ? Carbon::parse($request->query('since')) : null;
++        $before = (int) $request->query('before', 0);
++
++        $query = $contact->messages()->orderBy('id');
++
++        if ($before > 0) {
++            $older = $contact->messages()->where('id', '<', $before)->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
++
++            return response()->json(['messages' => $older->map(fn ($m) => self::messageRow($m)), 'has_more' => $older->count() === self::PAGE_SIZE]);
++        }
++
++        if ($after > 0 || $since) {
++            $query->where(function ($q) use ($after, $since) {
++                $q->where('id', '>', $after);
++                if ($since) {
++                    $q->orWhere('updated_at', '>', $since);
++                }
++            });
++            $messages = $query->get();
++        } else {
++            $messages = $contact->messages()->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
++        }
++
++        return response()->json([
++            'messages' => $messages->map(fn ($m) => self::messageRow($m)),
++            'contact' => ContactController::row($contact->fresh()),
++            'server_time' => now()->toIso8601String(),
++            'has_more' => ($after === 0 && ! $since) ? $messages->count() === self::PAGE_SIZE : false,
++        ]);
++    }
++
++    /** Clear the unread counter and send read receipts (blue ticks) for the last inbound message. */
++    public function markRead(Request $request, Contact $contact, MessagingService $messaging): JsonResponse
++    {
++        Gate::authorize('view', $contact);
++
++        $contact->update(['unread_count' => 0]);
++
++        $last = $contact->messages()->where('direction', Message::DIRECTION_INBOUND)->whereNotNull('wamid')->latest('id')->first();
++
++        if ($last && ! ($last->payload['_read_sent'] ?? false)) {
++            try {
++                $phone = $last->phoneNumber;
++                $messaging->for($phone)->markAsRead($phone->phone_number_id, $last->wamid);
++                $last->forceFill(['payload' => ($last->payload ?? []) + ['_read_sent' => true]])->saveQuietly();
++            } catch (GraphApiException $e) {
++                Log::info('mark-as-read failed', ['contact' => $contact->id, 'error' => $e->displayMessage()]);
++            }
++        }
++
++        return response()->json(['ok' => true]);
++    }
++
++    /** Send from the inbox composer. Returns the stored message as JSON. */
++    public function send(InboxSendRequest $request, Contact $contact, SendMessage $send): JsonResponse
++    {
++        Gate::authorize('view', $contact);
++
++        $data = $request->validated();
++
++        $phone = $data['phone_number_id'] ?? null
++            ? PhoneNumber::findOrFail($data['phone_number_id'])
++            : ($contact->phoneNumber ?? $request->user()->workspace->phoneNumbers()->where('is_registered', true)->orderByDesc('is_default')->firstOrFail());
++
++        Gate::authorize('update', $phone->account);
++
++        if (! $phone->is_registered) {
++            throw ValidationException::withMessages(['phone_number_id' => 'This phone number is not registered for Cloud API.']);
++        }
++
++        ConversationGuard::assertCanSend($contact, $data['type']);
++
++        try {
++            [$payload, $preview, $template] = OutboundMessageFactory::build($data, $phone, '+'.$contact->wa_id, $data['reply_to'] ?? null);
++        } catch (\InvalidArgumentException $e) {
++            throw ValidationException::withMessages(['type' => $e->getMessage()]);
++        }
++
++        try {
++            $message = $send($request->user(), $phone, $payload, $preview, $template, $contact);
++        } catch (GraphApiException $e) {
++            // The failed message row exists; return it so the bubble shows the error.
++            $failed = $contact->messages()->latest('id')->first();
++
++            return response()->json([
++                'message' => $failed ? self::messageRow($failed) : null,
++                'contact' => ContactController::row($contact->fresh()),
++                'error' => $e->displayMessage(),
++            ], 422);
++        }
++
++        return response()->json([
++            'message' => self::messageRow($message),
++            'contact' => ContactController::row($contact->fresh()),
++        ]);
++    }
++
++    /* Helpers ------------------------------------------------------------------ */
++
++    protected function conversationList(int $workspaceId, ?string $q): array
++    {
++        return Contact::where('workspace_id', $workspaceId)
++            ->search($q)
++            ->orderByDesc('last_message_at')
++            ->orderByDesc('unread_count')
++            ->orderBy('name')
++            ->limit(200)
++            ->get()
++            ->map(fn (Contact $c) => ContactController::row($c))
++            ->all();
++    }
++
++    protected function conversationPayload(Contact $contact): array
++    {
++        $messages = $contact->messages()->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
++
++        return [
++            'contact' => ContactController::row($contact->loadMissing('phoneNumber')),
++            'messages' => $messages->map(fn ($m) => self::messageRow($m))->all(),
++            'has_more' => $messages->count() === self::PAGE_SIZE,
++        ];
++    }
++
++    public static function messageRow(Message $m): array
++    {
++        return [
++            'id' => $m->id,
++            'wamid' => $m->wamid,
++            'direction' => $m->direction,
++            'type' => $m->type,
++            'status' => $m->status,
++            'preview' => $m->preview,
++            'body' => self::body($m),
++            'context_wamid' => $m->context_wamid,
++            'template_id' => $m->message_template_id,
++            'error_code' => $m->error_code,
++            'error_message' => $m->error_message,
++            'sent_at' => $m->sent_at?->toIso8601String(),
++            'delivered_at' => $m->delivered_at?->toIso8601String(),
++            'read_at' => $m->read_at?->toIso8601String(),
++            'failed_at' => $m->failed_at?->toIso8601String(),
++            'timestamp' => ($m->direction === Message::DIRECTION_INBOUND ? $m->received_at : $m->created_at)?->toIso8601String(),
++            'updated_at' => $m->updated_at?->toIso8601String(),
++        ];
++    }
++
++    /** What to render inside the bubble, by type. */
++    protected static function body(Message $m): array
++    {
++        $p = $m->payload ?? [];
++
++        return match ($m->type) {
++            'text' => ['text' => $p['text']['body'] ?? $m->preview],
++            'image', 'video', 'document', 'audio', 'sticker' => [
++                'media' => [
++                    'type' => $m->type,
++                    'id' => $p[$m->type]['id'] ?? null,
++                    'link' => $p[$m->type]['link'] ?? null,
++                    'caption' => $p[$m->type]['caption'] ?? null,
++                    'filename' => $p[$m->type]['filename'] ?? null,
++                    'mime_type' => $p[$m->type]['mime_type'] ?? null,
++                ],
++            ],
++            'location' => ['location' => $p['location'] ?? null],
++            'template' => ['template' => ['name' => $p['template']['name'] ?? null, 'text' => $m->preview]],
++            'interactive' => ['interactive' => $p['interactive'] ?? null, 'text' => $m->preview],
++            'button' => ['text' => $p['button']['text'] ?? $m->preview],
++            'reaction' => ['text' => ($p['reaction']['emoji'] ?? '').' (reaction)'],
++            default => ['text' => $m->preview],
++        };
++    }
++}
+diff --git a/app/Http/Controllers/Messaging/MessageController.php b/app/Http/Controllers/Messaging/MessageController.php
+index a959780..11aafb7 100644
+--- a/app/Http/Controllers/Messaging/MessageController.php
++++ b/app/Http/Controllers/Messaging/MessageController.php
+@@ -9,8 +9,8 @@
+ use App\Models\Message;
+ use App\Models\MessageTemplate;
+ use App\Models\PhoneNumber;
+-use App\Support\MessagePayloadBuilder;
+-use App\Support\TemplatePayloadBuilder;
++use App\Support\ConversationGuard;
++use App\Support\OutboundMessageFactory;
+ use Illuminate\Http\RedirectResponse;
+ use Illuminate\Http\Request;
+ use Illuminate\Support\Facades\Gate;
+@@ -82,9 +82,17 @@ public function create(Request $request): Response
+                 'components' => $t->components,
+             ]);
+ 
++        $contacts = $workspace->contacts()->orderBy('name')->get()->map(fn ($c) => [
++            'id' => $c->id,
++            'wa_id' => $c->wa_id,
++            'name' => $c->name,
++            'window' => $c->windowState(),
++        ]);
++
+         return Inertia::render('messages/create', [
+             'phones' => $phones,
+             'templates' => $templates,
++            'contacts' => $contacts,
+             'reply_to' => $request->query('reply_to'),
+             'to' => $request->query('to'),
+         ]);
+@@ -101,38 +109,17 @@ public function store(SendMessageRequest $request, SendMessage $send): RedirectR
+             throw ValidationException::withMessages(['phone_number_id' => 'This phone number is not registered for Cloud API yet.']);
+         }
+ 
+-        $builder = new MessagePayloadBuilder(preg_replace('/[^\d+]/', '', $data['to']), $data['reply_to'] ?? null);
+-        $template = null;
++        $contact = ConversationGuard::resolveContact($request->user()->workspace_id, $data['to']);
++        ConversationGuard::assertCanSend($contact, $data['type']);
+ 
+         try {
+-            [$payload, $preview] = match ($data['type']) {
+-                'text' => [
+-                    $builder->text($data['text']['body'], (bool) ($data['text']['preview_url'] ?? false)),
+-                    $data['text']['body'],
+-                ],
+-                'image', 'video', 'document', 'audio', 'sticker' => [
+-                    $builder->media(
+-                        $data['type'],
+-                        ($data['media']['source'] ?? 'link') === 'id' ? ($data['media']['id'] ?? null) : null,
+-                        ($data['media']['source'] ?? 'link') === 'link' ? ($data['media']['link'] ?? null) : null,
+-                        $data['media']['caption'] ?? null,
+-                        $data['media']['filename'] ?? null,
+-                    ),
+-                    ucfirst($data['type']).(($data['media']['caption'] ?? '') !== '' ? ': '.$data['media']['caption'] : ''),
+-                ],
+-                'location' => [
+-                    $builder->location($data['location']['latitude'], $data['location']['longitude'], $data['location']['name'] ?? null, $data['location']['address'] ?? null),
+-                    'Location: '.($data['location']['name'] ?? "{$data['location']['latitude']},{$data['location']['longitude']}"),
+-                ],
+-                'interactive' => $this->interactive($builder, $data['interactive'] ?? []),
+-                'template' => $this->templatePayload($builder, $data['template'], $phone, $template),
+-            };
++            [$payload, $preview, $template] = OutboundMessageFactory::build($data, $phone, $data['to'], $data['reply_to'] ?? null);
+         } catch (\InvalidArgumentException $e) {
+             throw ValidationException::withMessages(['type' => $e->getMessage()]);
+         }
+ 
+         try {
+-            $message = $send($request->user(), $phone, $payload, $preview, $template);
++            $message = $send($request->user(), $phone, $payload, $preview, $template, $contact);
+         } catch (GraphApiException $e) {
+             return back()->withInput()->with('error', 'Meta rejected the message: '.$e->displayMessage());
+         }
+@@ -160,42 +147,6 @@ public function show(Request $request, Message $message): Response
+         ]);
+     }
+ 
+-    protected function interactive(MessagePayloadBuilder $builder, array $i): array
+-    {
+-        if (($i['kind'] ?? 'button') === 'list') {
+-            $sections = array_values(array_filter($i['sections'] ?? [], fn ($s) => ! empty($s['rows'])));
+-
+-            return [
+-                $builder->list($i['body'], $i['button_text'] ?? 'Choose', $sections, $i['header'] ?? null, $i['footer'] ?? null),
+-                'List: '.$i['body'],
+-            ];
+-        }
+-
+-        return [
+-            $builder->replyButtons($i['body'], $i['buttons'] ?? [], $i['header'] ?? null, $i['footer'] ?? null),
+-            'Buttons: '.$i['body'],
+-        ];
+-    }
+-
+-    protected function templatePayload(MessagePayloadBuilder $builder, array $input, PhoneNumber $phone, ?MessageTemplate &$template): array
+-    {
+-        $template = MessageTemplate::findOrFail($input['id']);
+-
+-        if ($template->whatsapp_account_id !== $phone->whatsapp_account_id) {
+-            throw new \InvalidArgumentException('This template belongs to a different WhatsApp Business Account.');
+-        }
+-        if (! $template->isSendable()) {
+-            throw new \InvalidArgumentException("Template {$template->name} is {$template->status}; only APPROVED templates can be sent.");
+-        }
+-
+-        $components = MessagePayloadBuilder::templateComponents($template, $input);
+-
+-        return [
+-            $builder->template($template->name, $template->language, $components),
+-            'Template '.$template->name.': '.TemplatePayloadBuilder::summarize($template->components),
+-        ];
+-    }
+-
+     protected function row(Message $m): array
+     {
+         return [
+diff --git a/app/Http/Requests/ContactRequest.php b/app/Http/Requests/ContactRequest.php
+new file mode 100644
+index 0000000..7a5db3b
+--- /dev/null
++++ b/app/Http/Requests/ContactRequest.php
+@@ -0,0 +1,55 @@
++<?php
++
++namespace App\Http\Requests;
++
++use App\Models\Contact;
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++class ContactRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user() !== null;
++    }
++
++    protected function prepareForValidation(): void
++    {
++        $phone = (string) $this->input('phone', '');
++        $this->merge([
++            'wa_id' => Contact::normalizeWaId($phone),
++            'phone' => $phone !== '' ? '+'.Contact::normalizeWaId($phone) : null,
++            'tags' => collect($this->input('tags', []))->map(fn ($t) => trim((string) $t))->filter()->unique()->values()->all(),
++        ]);
++    }
++
++    public function rules(): array
++    {
++        $contactId = $this->route('contact')?->id;
++
++        return [
++            'name' => ['required', 'string', 'max:120'],
++            'phone' => ['required', 'string', 'regex:/^\+[1-9][0-9]{6,15}$/'],
++            'wa_id' => [
++                'required',
++                Rule::unique('contacts', 'wa_id')
++                    ->where('workspace_id', $this->user()->workspace_id)
++                    ->ignore($contactId),
++            ],
++            'email' => ['nullable', 'email', 'max:190'],
++            'company' => ['nullable', 'string', 'max:120'],
++            'tags' => ['nullable', 'array', 'max:20'],
++            'tags.*' => ['string', 'max:40'],
++            'notes' => ['nullable', 'string', 'max:5000'],
++            'phone_number_id' => ['nullable', 'integer', 'exists:phone_numbers,id'],
++        ];
++    }
++
++    public function messages(): array
++    {
++        return [
++            'phone.regex' => 'Enter the number in international format, e.g. +971501234567.',
++            'wa_id.unique' => 'A contact with this WhatsApp number already exists.',
++        ];
++    }
++}
+diff --git a/app/Http/Requests/InboxSendRequest.php b/app/Http/Requests/InboxSendRequest.php
+new file mode 100644
+index 0000000..14cd1cf
+--- /dev/null
++++ b/app/Http/Requests/InboxSendRequest.php
+@@ -0,0 +1,47 @@
++<?php
++
++namespace App\Http\Requests;
++
++use Illuminate\Foundation\Http\FormRequest;
++use Illuminate\Validation\Rule;
++
++/** Inbox composer: text, media (already uploaded / link) or template. */
++class InboxSendRequest extends FormRequest
++{
++    public function authorize(): bool
++    {
++        return $this->user() !== null;
++    }
++
++    public function rules(): array
++    {
++        return [
++            'phone_number_id' => ['nullable', 'integer', 'exists:phone_numbers,id'],
++            'reply_to' => ['nullable', 'string', 'max:255'],
++            'type' => ['required', Rule::in(['text', 'template', 'image', 'video', 'document', 'audio'])],
++
++            'text' => ['required_if:type,text', 'array'],
++            'text.body' => ['required_if:type,text', 'nullable', 'string', 'max:4096'],
++            'text.preview_url' => ['nullable', 'boolean'],
++
++            'media' => ['required_if:type,image,video,document,audio', 'array'],
++            'media.source' => ['nullable', Rule::in(['link', 'id'])],
++            'media.link' => ['nullable', 'url', 'max:2048'],
++            'media.id' => ['nullable', 'string', 'max:64'],
++            'media.caption' => ['nullable', 'string', 'max:1024'],
++            'media.filename' => ['nullable', 'string', 'max:240'],
++
++            'template' => ['required_if:type,template', 'array'],
++            'template.id' => ['required_if:type,template', 'nullable', 'integer', 'exists:message_templates,id'],
++            'template.header' => ['nullable', 'array'],
++            'template.body' => ['nullable', 'array'],
++            'template.body.*' => ['nullable', 'string', 'max:1024'],
++            'template.buttons' => ['nullable', 'array'],
++            'template.buttons.*.index' => ['nullable', 'integer', 'min:0', 'max:9'],
++            'template.buttons.*.sub_type' => ['nullable', Rule::in(['quick_reply', 'url', 'copy_code'])],
++            'template.buttons.*.payload' => ['nullable', 'string', 'max:256'],
++            'template.buttons.*.text' => ['nullable', 'string', 'max:512'],
++            'template.buttons.*.coupon_code' => ['nullable', 'string', 'max:15'],
++        ];
++    }
++}
+diff --git a/app/Jobs/ProcessWhatsAppWebhook.php b/app/Jobs/ProcessWhatsAppWebhook.php
+index 1d128cd..9b2463b 100644
+--- a/app/Jobs/ProcessWhatsAppWebhook.php
++++ b/app/Jobs/ProcessWhatsAppWebhook.php
+@@ -88,9 +88,19 @@ protected function handleMessages(WebhookEvent $event, array $value): void
+             $contact = Contact::firstOrCreate(['workspace_id' => $workspaceId, 'wa_id' => $waId]);
+ 
+             $profileName = $profiles[$waId]['profile']['name'] ?? null;
+-            $contact->update(array_filter(['name' => $profileName, 'last_inbound_at' => now()]));
++            $contact->update(array_filter([
++                'name' => $contact->name ?: $profileName,          // never overwrite a name the admin typed
++                'phone' => $contact->phone ?: '+'.$waId,
++                'source' => $contact->wasRecentlyCreated ? 'inbound' : null,
++                'last_inbound_at' => now(),
++            ]));
++            if ($contact->wasRecentlyCreated) {
++                $contact->forceFill(['meta' => ['profile_name' => $profileName]])->save();
++            }
++
++            $receivedAt = isset($incoming['timestamp']) ? Carbon::createFromTimestamp((int) $incoming['timestamp']) : now();
+ 
+-            Message::firstOrCreate(
++            $message = Message::firstOrCreate(
+                 ['wamid' => $incoming['id']],
+                 [
+                     'workspace_id' => $workspaceId,
+@@ -104,11 +114,18 @@ protected function handleMessages(WebhookEvent $event, array $value): void
+                     'context_wamid' => $incoming['context']['id'] ?? null,
+                     'preview' => $this->inboundPreview($incoming),
+                     'payload' => $incoming,
+-                    'received_at' => isset($incoming['timestamp']) ? Carbon::createFromTimestamp((int) $incoming['timestamp']) : now(),
++                    'received_at' => $receivedAt,
+                     'error_code' => $incoming['errors'][0]['code'] ?? null,
+                     'error_title' => $incoming['errors'][0]['title'] ?? null,
+                 ]
+             );
++
++            if ($message->wasRecentlyCreated) {
++                // A customer message (re)opens the 24-hour customer-service window.
++                $contact->openWindow(Contact::OPENED_BY_INBOUND, $receivedAt);
++                $contact->increment('unread_count');
++                $contact->touchConversation($message);
++            }
+         }
+     }
+ 
+diff --git a/app/Models/Contact.php b/app/Models/Contact.php
+index 5b77480..918d48f 100644
+--- a/app/Models/Contact.php
++++ b/app/Models/Contact.php
+@@ -2,17 +2,37 @@
+ 
+ namespace App\Models;
+ 
++use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Database\Eloquent\Model;
+ use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ use Illuminate\Database\Eloquent\Relations\HasMany;
++use Illuminate\Support\Carbon;
+ 
+ class Contact extends Model
+ {
+-    protected $fillable = ['workspace_id', 'wa_id', 'name', 'last_inbound_at', 'last_outbound_at', 'meta'];
++    public const WINDOW_HOURS = 24;
++
++    public const OPENED_BY_INBOUND = 'inbound';
++
++    public const OPENED_BY_TEMPLATE = 'template';
++
++    protected $fillable = [
++        'workspace_id', 'wa_id', 'phone', 'name', 'email', 'company', 'tags', 'notes', 'source',
++        'phone_number_id', 'created_by', 'last_inbound_at', 'last_outbound_at', 'last_message_at',
++        'last_message_preview', 'last_message_direction', 'unread_count', 'window_expires_at', 'window_opened_by', 'meta',
++    ];
+ 
+     protected function casts(): array
+     {
+-        return ['meta' => 'array', 'last_inbound_at' => 'datetime', 'last_outbound_at' => 'datetime'];
++        return [
++            'meta' => 'array',
++            'tags' => 'array',
++            'last_inbound_at' => 'datetime',
++            'last_outbound_at' => 'datetime',
++            'last_message_at' => 'datetime',
++            'window_expires_at' => 'datetime',
++            'unread_count' => 'integer',
++        ];
+     }
+ 
+     public function workspace(): BelongsTo
+@@ -25,8 +45,97 @@ public function messages(): HasMany
+         return $this->hasMany(Message::class);
+     }
+ 
++    public function phoneNumber(): BelongsTo
++    {
++        return $this->belongsTo(PhoneNumber::class, 'phone_number_id');
++    }
++
++    public function creator(): BelongsTo
++    {
++        return $this->belongsTo(User::class, 'created_by');
++    }
++
++    /* Conversation window ----------------------------------------------- */
++
++    /** True while free-form (non-template) messages may be sent to this contact. */
++    public function isWindowOpen(): bool
++    {
++        return $this->window_expires_at !== null && $this->window_expires_at->isFuture();
++    }
++
++    /** Opens / extends the 24-hour window. Inbound messages always open it; templates only when configured. */
++    public function openWindow(string $openedBy, ?Carbon $from = null): void
++    {
++        $from ??= now();
++
++        $this->forceFill([
++            'window_expires_at' => $from->copy()->addHours(self::WINDOW_HOURS),
++            'window_opened_by' => $openedBy,
++        ])->save();
++    }
++
++    public function windowState(): array
++    {
++        $open = $this->isWindowOpen();
++
++        return [
++            'open' => $open,
++            'expires_at' => $this->window_expires_at?->toIso8601String(),
++            'opened_by' => $this->window_opened_by,
++            'seconds_left' => $open ? max(0, now()->diffInSeconds($this->window_expires_at, false)) : 0,
++            'has_history' => $this->last_message_at !== null,
++        ];
++    }
++
++    /** Record the latest message on the conversation summary used by the inbox list. */
++    public function touchConversation(Message $message): void
++    {
++        $this->forceFill([
++            'last_message_at' => $message->created_at ?? now(),
++            'last_message_preview' => $message->preview,
++            'last_message_direction' => $message->direction,
++            'phone_number_id' => $this->phone_number_id ?? $message->phone_number_id,
++        ])->save();
++    }
++
++    /* Helpers ------------------------------------------------------------ */
++
+     public static function normalizeWaId(string $number): string
+     {
+         return preg_replace('/\D+/', '', $number) ?? '';
+     }
++
++    public function displayName(): string
++    {
++        return $this->name ?: '+'.$this->wa_id;
++    }
++
++    public function initials(): string
++    {
++        $name = trim((string) $this->name);
++        if ($name === '') {
++            return substr($this->wa_id, -2);
++        }
++        $parts = preg_split('/\s+/', $name);
++
++        return strtoupper(substr($parts[0], 0, 1).substr($parts[1] ?? '', 0, 1));
++    }
++
++    public function scopeSearch(Builder $query, ?string $term): Builder
++    {
++        $term = trim((string) $term);
++        if ($term === '') {
++            return $query;
++        }
++        $digits = self::normalizeWaId($term);
++
++        return $query->where(function (Builder $q) use ($term, $digits) {
++            $q->where('name', 'like', "%{$term}%")
++                ->orWhere('email', 'like', "%{$term}%")
++                ->orWhere('company', 'like', "%{$term}%");
++            if ($digits !== '') {
++                $q->orWhere('wa_id', 'like', "%{$digits}%");
++            }
++        });
++    }
+ }
+diff --git a/app/Policies/ContactPolicy.php b/app/Policies/ContactPolicy.php
+new file mode 100644
+index 0000000..168a14c
+--- /dev/null
++++ b/app/Policies/ContactPolicy.php
+@@ -0,0 +1,24 @@
++<?php
++
++namespace App\Policies;
++
++use App\Models\Contact;
++use App\Models\User;
++
++class ContactPolicy
++{
++    public function view(User $user, Contact $contact): bool
++    {
++        return $user->workspace_id === $contact->workspace_id;
++    }
++
++    public function update(User $user, Contact $contact): bool
++    {
++        return $this->view($user, $contact);
++    }
++
++    public function delete(User $user, Contact $contact): bool
++    {
++        return $this->view($user, $contact);
++    }
++}
+diff --git a/app/Providers/AppServiceProvider.php b/app/Providers/AppServiceProvider.php
+index 71c559b..7a9f20b 100644
+--- a/app/Providers/AppServiceProvider.php
++++ b/app/Providers/AppServiceProvider.php
+@@ -4,6 +4,8 @@
+ 
+ use App\Models\Message;
+ use App\Models\WhatsAppAccount;
++use App\Models\Contact;
++use App\Policies\ContactPolicy;
+ use App\Policies\MessagePolicy;
+ use App\Policies\WhatsAppAccountPolicy;
+ use App\Services\Meta\GraphClient;
+@@ -24,5 +26,6 @@ public function boot(): void
+     {
+         Gate::policy(WhatsAppAccount::class, WhatsAppAccountPolicy::class);
+         Gate::policy(Message::class, MessagePolicy::class);
++        Gate::policy(Contact::class, ContactPolicy::class);
+     }
+ }
+diff --git a/app/Support/ConversationGuard.php b/app/Support/ConversationGuard.php
+new file mode 100644
+index 0000000..47a1770
+--- /dev/null
++++ b/app/Support/ConversationGuard.php
+@@ -0,0 +1,48 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\Contact;
++use Illuminate\Validation\ValidationException;
++
++/**
++ * Enforces the product rules for outbound messages:
++ *  - the recipient must already exist as a Contact in the workspace;
++ *  - free-form (non-template) messages are only allowed while the contact's 24-hour window is open.
++ */
++class ConversationGuard
++{
++    public const WINDOW_CLOSED_MESSAGE = '24-hour window has been closed. Send an approved template to open the conversation.';
++
++    public const NO_HISTORY_MESSAGE = 'This contact has not messaged you yet. The first message must be an approved template.';
++
++    public static function resolveContact(int $workspaceId, string $to): Contact
++    {
++        $waId = Contact::normalizeWaId($to);
++
++        $contact = Contact::where('workspace_id', $workspaceId)->where('wa_id', $waId)->first();
++
++        if (! $contact) {
++            throw ValidationException::withMessages([
++                'to' => "No contact with number +{$waId}. Create the contact first, then start the conversation with a template.",
++            ]);
++        }
++
++        return $contact;
++    }
++
++    public static function assertCanSend(Contact $contact, string $type, string $field = 'type'): void
++    {
++        if ($type === 'template') {
++            return;
++        }
++
++        if ($contact->isWindowOpen()) {
++            return;
++        }
++
++        throw ValidationException::withMessages([
++            $field => $contact->last_message_at ? self::WINDOW_CLOSED_MESSAGE : self::NO_HISTORY_MESSAGE,
++        ]);
++    }
++}
+diff --git a/app/Support/OutboundMessageFactory.php b/app/Support/OutboundMessageFactory.php
+new file mode 100644
+index 0000000..279748d
+--- /dev/null
++++ b/app/Support/OutboundMessageFactory.php
+@@ -0,0 +1,91 @@
++<?php
++
++namespace App\Support;
++
++use App\Models\MessageTemplate;
++use App\Models\PhoneNumber;
++use InvalidArgumentException;
++
++/**
++ * Turns validated composer / inbox input into the exact Cloud API Messages Object.
++ * Returns [payload, human preview, ?MessageTemplate].
++ */
++class OutboundMessageFactory
++{
++    /**
++     * @param  array  $data  validated SendMessageRequest / InboxSendRequest data
++     * @return array{0: array, 1: string, 2: ?MessageTemplate}
++     *
++     * @throws InvalidArgumentException
++     */
++    public static function build(array $data, PhoneNumber $phone, string $to, ?string $replyTo = null): array
++    {
++        $builder = new MessagePayloadBuilder(preg_replace('/[^\d+]/', '', $to), $replyTo ?: null);
++
++        return match ($data['type']) {
++            'text' => [
++                $builder->text($data['text']['body'], (bool) ($data['text']['preview_url'] ?? false)),
++                $data['text']['body'],
++                null,
++            ],
++            'image', 'video', 'document', 'audio', 'sticker' => [
++                $builder->media(
++                    $data['type'],
++                    ($data['media']['source'] ?? 'link') === 'id' ? ($data['media']['id'] ?? null) : null,
++                    ($data['media']['source'] ?? 'link') === 'link' ? ($data['media']['link'] ?? null) : null,
++                    $data['media']['caption'] ?? null,
++                    $data['media']['filename'] ?? null,
++                ),
++                ucfirst($data['type']).(($data['media']['caption'] ?? '') !== '' ? ': '.$data['media']['caption'] : ''),
++                null,
++            ],
++            'location' => [
++                $builder->location($data['location']['latitude'], $data['location']['longitude'], $data['location']['name'] ?? null, $data['location']['address'] ?? null),
++                'Location: '.($data['location']['name'] ?? "{$data['location']['latitude']},{$data['location']['longitude']}"),
++                null,
++            ],
++            'interactive' => self::interactive($builder, $data['interactive'] ?? []),
++            'template' => self::template($builder, $data['template'] ?? [], $phone),
++            default => throw new InvalidArgumentException("Unsupported message type {$data['type']}."),
++        };
++    }
++
++    protected static function interactive(MessagePayloadBuilder $builder, array $i): array
++    {
++        if (($i['kind'] ?? 'button') === 'list') {
++            $sections = array_values(array_filter($i['sections'] ?? [], fn ($s) => ! empty($s['rows'])));
++
++            return [
++                $builder->list($i['body'], $i['button_text'] ?? 'Choose', $sections, $i['header'] ?? null, $i['footer'] ?? null),
++                'List: '.$i['body'],
++                null,
++            ];
++        }
++
++        return [
++            $builder->replyButtons($i['body'], $i['buttons'] ?? [], $i['header'] ?? null, $i['footer'] ?? null),
++            'Buttons: '.$i['body'],
++            null,
++        ];
++    }
++
++    protected static function template(MessagePayloadBuilder $builder, array $input, PhoneNumber $phone): array
++    {
++        $template = MessageTemplate::findOrFail($input['id'] ?? 0);
++
++        if ($template->whatsapp_account_id !== $phone->whatsapp_account_id) {
++            throw new InvalidArgumentException('This template belongs to a different WhatsApp Business Account.');
++        }
++        if (! $template->isSendable()) {
++            throw new InvalidArgumentException("Template {$template->name} is {$template->status}; only APPROVED templates can be sent.");
++        }
++
++        $components = MessagePayloadBuilder::templateComponents($template, $input);
++
++        return [
++            $builder->template($template->name, $template->language, $components),
++            'Template '.$template->name.': '.TemplatePayloadBuilder::summarize($template->components),
++            $template,
++        ];
++    }
++}
+diff --git a/config/whatsapp.php b/config/whatsapp.php
+index 198630f..c4dddaa 100644
+--- a/config/whatsapp.php
++++ b/config/whatsapp.php
+@@ -40,6 +40,17 @@
+         'auto_register' => (bool) env('WHATSAPP_AUTO_REGISTER', true),
+     ],
+ 
++    'inbox' => [
++        'poll_interval_ms' => (int) env('WHATSAPP_INBOX_POLL_MS', 4000),
++    ],
++
++    'conversation' => [
++        // Product rule requested for Engage: a successfully sent template opens the 24-hour window for
++        // free-form replies. NOTE: Meta only guarantees free-form delivery inside a *customer-initiated*
++        // service window; if the customer never replies, free-form messages may still fail with 131047.
++        'template_opens_window' => (bool) env('WHATSAPP_TEMPLATE_OPENS_WINDOW', true),
++    ],
++
+     'partner' => [
+         // tech_provider | solution_partner
+         'type' => env('WHATSAPP_PARTNER_TYPE', 'tech_provider'),
+diff --git a/database/migrations/2026_09_18_000001_add_conversation_fields_to_contacts_table.php b/database/migrations/2026_09_18_000001_add_conversation_fields_to_contacts_table.php
+new file mode 100644
+index 0000000..db995a0
+--- /dev/null
++++ b/database/migrations/2026_09_18_000001_add_conversation_fields_to_contacts_table.php
+@@ -0,0 +1,43 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++/**
++ * Contacts become first-class CRM records and carry the conversation state used by the inbox:
++ * the 24-hour customer-service window, unread counter and last-message summary.
++ */
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('contacts', function (Blueprint $table) {
++            $table->string('phone', 32)->nullable()->after('wa_id');            // E.164 with +
++            $table->string('email')->nullable()->after('name');
++            $table->string('company')->nullable()->after('email');
++            $table->json('tags')->nullable()->after('company');
++            $table->text('notes')->nullable()->after('tags');
++            $table->string('source', 32)->default('manual')->after('notes');    // manual | inbound | outbound | import
++            $table->foreignId('phone_number_id')->nullable()->after('source')->constrained('phone_numbers')->nullOnDelete(); // preferred sender
++            $table->foreignId('created_by')->nullable()->after('phone_number_id')->constrained('users')->nullOnDelete();
++            $table->timestamp('last_message_at')->nullable()->after('last_outbound_at');
++            $table->text('last_message_preview')->nullable()->after('last_message_at');
++            $table->string('last_message_direction', 16)->nullable()->after('last_message_preview');
++            $table->unsignedInteger('unread_count')->default(0)->after('last_message_direction');
++            $table->timestamp('window_expires_at')->nullable()->after('unread_count');   // 24h customer-service window
++            $table->string('window_opened_by', 16)->nullable()->after('window_expires_at'); // inbound | template
++            $table->index(['workspace_id', 'last_message_at']);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('contacts', function (Blueprint $table) {
++            $table->dropIndex(['workspace_id', 'last_message_at']);
++            $table->dropConstrainedForeignId('phone_number_id');
++            $table->dropConstrainedForeignId('created_by');
++            $table->dropColumn(['phone', 'email', 'company', 'tags', 'notes', 'source', 'last_message_at', 'last_message_preview', 'last_message_direction', 'unread_count', 'window_expires_at', 'window_opened_by']);
++        });
++    }
++};
+diff --git a/resources/js/components/app-sidebar.tsx b/resources/js/components/app-sidebar.tsx
+index 33b68ee..aee6eff 100644
+--- a/resources/js/components/app-sidebar.tsx
++++ b/resources/js/components/app-sidebar.tsx
+@@ -4,15 +4,17 @@ import { NavUser } from '@/components/nav-user';
+ import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
+ import { type NavItem } from '@/types';
+ import { Link } from '@inertiajs/react';
+-import { BookOpen, Building2, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap } from 'lucide-react';
++import { BookOpen, Building2, Inbox, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap, Users } from 'lucide-react';
+ import AppLogo from './app-logo';
+ 
+ const mainNavItems: NavItem[] = [
+     { title: 'Dashboard', url: '/dashboard', icon: LayoutGrid },
+-    { title: 'Onboarding', url: '/onboarding', icon: PlugZap },
+-    { title: 'Accounts', url: '/accounts', icon: Building2 },
+-    { title: 'Messages', url: '/messages', icon: MessageSquareText },
++    { title: 'Inbox', url: '/inbox', icon: Inbox },
++    { title: 'Contacts', url: '/contacts', icon: Users },
+     { title: 'Templates', url: '/templates', icon: LayoutTemplate },
++    { title: 'Message log', url: '/messages', icon: MessageSquareText },
++    { title: 'Accounts', url: '/accounts', icon: Building2 },
++    { title: 'Onboarding', url: '/onboarding', icon: PlugZap },
+ ];
+ 
+ const footerNavItems: NavItem[] = [
+diff --git a/resources/js/components/inbox/composer.tsx b/resources/js/components/inbox/composer.tsx
+new file mode 100644
+index 0000000..59290fd
+--- /dev/null
++++ b/resources/js/components/inbox/composer.tsx
+@@ -0,0 +1,96 @@
++import { Button } from '@/components/ui/button';
++import { Textarea } from '@/components/ui/textarea';
++import { formatCountdown } from '@/lib/format';
++import { cn } from '@/lib/utils';
++import { type ChatMessage, type WindowState } from '@/types/whatsapp';
++import { LayoutTemplate, Loader2, Lock, Paperclip, Send, X } from 'lucide-react';
++import { KeyboardEvent, useRef, useState } from 'react';
++
++interface Props {
++    window: WindowState;
++    secondsLeft: number;
++    sending: boolean;
++    replyTo: ChatMessage | null;
++    onCancelReply: () => void;
++    onSendText: (body: string) => Promise<void> | void;
++    onSendFile: (file: File) => Promise<void> | void;
++    onOpenTemplates: () => void;
++    hasTemplates: boolean;
++}
++
++export default function Composer({ window: w, secondsLeft, sending, replyTo, onCancelReply, onSendText, onSendFile, onOpenTemplates, hasTemplates }: Props) {
++    const [text, setText] = useState('');
++    const fileRef = useRef<HTMLInputElement>(null);
++    const open = w.open && secondsLeft > 0;
++
++    const submit = async () => {
++        const body = text.trim();
++        if (!body || sending) return;
++        setText('');
++        await onSendText(body);
++    };
++
++    const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
++        if (e.key === 'Enter' && !e.shiftKey) {
++            e.preventDefault();
++            submit();
++        }
++    };
++
++    if (!open) {
++        return (
++            <div className="border-t bg-white p-3">
++                <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed bg-zinc-50 px-4 py-4 text-center">
++                    <p className="flex items-center gap-2 text-sm font-medium text-zinc-800">
++                        <Lock className="size-4" />
++                        {w.has_history ? '24-hour window has been closed.' : 'No conversation window yet.'}
++                    </p>
++                    <p className="max-w-md text-xs text-muted-foreground">
++                        {w.has_history
++                            ? 'More than 24 hours have passed since the last customer message or template. Send an approved template to reopen the conversation.'
++                            : 'The first message to a new contact must be an approved template. Once it is sent (or the customer messages you), free-form replies unlock for 24 hours.'}
++                    </p>
++                    <Button type="button" onClick={onOpenTemplates} disabled={!hasTemplates}>
++                        <LayoutTemplate /> {hasTemplates ? 'Send a template' : 'No approved templates yet'}
++                    </Button>
++                </div>
++            </div>
++        );
++    }
++
++    return (
++        <div className="border-t bg-white">
++            {replyTo && (
++                <div className="flex items-center justify-between gap-2 border-b bg-zinc-50 px-3 py-1.5 text-xs">
++                    <p className="truncate border-l-2 border-brand pl-2 text-muted-foreground">Replying to: {replyTo.preview}</p>
++                    <button type="button" onClick={onCancelReply} className="rounded p-1 hover:bg-zinc-200">
++                        <X className="size-3.5" />
++                    </button>
++                </div>
++            )}
++            <div className="flex items-end gap-2 p-2.5">
++                <Button type="button" variant="ghost" size="icon" title="Send a template" onClick={onOpenTemplates}>
++                    <LayoutTemplate />
++                </Button>
++                <Button type="button" variant="ghost" size="icon" title="Attach image, video, audio or document" onClick={() => fileRef.current?.click()} disabled={sending}>
++                    <Paperclip />
++                </Button>
++                <input ref={fileRef} type="file" className="hidden" accept="image/jpeg,image/png,video/mp4,audio/*,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt" onChange={(e) => e.target.files?.[0] && onSendFile(e.target.files[0])} />
++                <Textarea
++                    value={text}
++                    onChange={(e) => setText(e.target.value)}
++                    onKeyDown={onKey}
++                    rows={1}
++                    placeholder="Type a message — Enter to send, Shift+Enter for a new line"
++                    className="max-h-40 min-h-10 flex-1 resize-none bg-zinc-50"
++                />
++                <Button type="button" onClick={submit} disabled={!text.trim() || sending} className={cn('shrink-0')}>
++                    {sending ? <Loader2 className="animate-spin" /> : <Send />}
++                </Button>
++            </div>
++            <p className="px-3 pb-2 text-[11px] text-muted-foreground">
++                Window open — free-form messages allowed for another {formatCountdown(secondsLeft)} ({w.opened_by === 'template' ? 'opened by template' : 'opened by customer message'}).
++            </p>
++        </div>
++    );
++}
+diff --git a/resources/js/components/inbox/conversation-list.tsx b/resources/js/components/inbox/conversation-list.tsx
+new file mode 100644
+index 0000000..06919c8
+--- /dev/null
++++ b/resources/js/components/inbox/conversation-list.tsx
+@@ -0,0 +1,64 @@
++import WindowBadge from '@/components/inbox/window-badge';
++import { Input } from '@/components/ui/input';
++import { formatListTime } from '@/lib/format';
++import { cn } from '@/lib/utils';
++import { type ContactRow } from '@/types/whatsapp';
++import { Link } from '@inertiajs/react';
++import { Check, CheckCheck, Plus, Search } from 'lucide-react';
++
++interface Props {
++    conversations: ContactRow[];
++    selectedId: number | null;
++    query: string;
++    onQuery: (q: string) => void;
++    onSelect: (contact: ContactRow) => void;
++}
++
++export default function ConversationList({ conversations, selectedId, query, onQuery, onSelect }: Props) {
++    return (
++        <div className="flex h-full flex-col">
++            <div className="flex items-center gap-2 border-b p-3">
++                <div className="relative flex-1">
++                    <Search className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
++                    <Input value={query} onChange={(e) => onQuery(e.target.value)} placeholder="Search name or number" className="h-9 pl-8" />
++                </div>
++                <Link href={route('contacts.create')} className="inline-flex size-9 items-center justify-center rounded-md bg-brand text-[#14200a] hover:bg-brand/90" title="New contact">
++                    <Plus className="size-4" />
++                </Link>
++            </div>
++
++            <div className="flex-1 overflow-y-auto">
++                {conversations.length === 0 && <p className="p-6 text-center text-sm text-muted-foreground">No contacts yet. Add a contact to start a conversation, or wait for an inbound message.</p>}
++                {conversations.map((c) => {
++                    const active = c.id === selectedId;
++                    return (
++                        <button
++                            key={c.id}
++                            type="button"
++                            onClick={() => onSelect(c)}
++                            className={cn('flex w-full items-center gap-3 border-b px-3 py-2.5 text-left transition-colors hover:bg-muted/60', active && 'bg-brand-soft hover:bg-brand-soft')}
++                        >
++                            <div className="relative shrink-0">
++                                <div className={cn('flex size-11 items-center justify-center rounded-full text-sm font-semibold', active ? 'bg-brand text-[#14200a]' : 'bg-zinc-200 text-zinc-700')}>{c.initials}</div>
++                                <WindowBadge window={c.window} compact className="absolute right-0 bottom-0 ring-2 ring-white" />
++                            </div>
++                            <div className="min-w-0 flex-1">
++                                <div className="flex items-baseline justify-between gap-2">
++                                    <p className={cn('truncate text-sm', c.unread_count > 0 ? 'font-semibold' : 'font-medium')}>{c.display_name}</p>
++                                    <span className={cn('shrink-0 text-[11px]', c.unread_count > 0 ? 'font-semibold text-brand-dark' : 'text-muted-foreground')}>{formatListTime(c.last_message_at)}</span>
++                                </div>
++                                <div className="flex items-center justify-between gap-2">
++                                    <p className={cn('flex min-w-0 items-center gap-1 truncate text-xs', c.unread_count > 0 ? 'text-foreground' : 'text-muted-foreground')}>
++                                        {c.last_message_direction === 'outbound' && (c.last_message_preview ? <CheckCheck className="size-3 shrink-0 text-muted-foreground" /> : <Check className="size-3 shrink-0" />)}
++                                        <span className="truncate">{c.last_message_preview ?? (c.name ? c.phone : 'No messages yet')}</span>
++                                    </p>
++                                    {c.unread_count > 0 && <span className="shrink-0 rounded-full bg-brand px-1.5 py-0.5 text-[10px] font-bold text-[#14200a]">{c.unread_count}</span>}
++                                </div>
++                            </div>
++                        </button>
++                    );
++                })}
++            </div>
++        </div>
++    );
++}
+diff --git a/resources/js/components/inbox/message-bubble.tsx b/resources/js/components/inbox/message-bubble.tsx
+new file mode 100644
+index 0000000..dcca441
+--- /dev/null
++++ b/resources/js/components/inbox/message-bubble.tsx
+@@ -0,0 +1,76 @@
++import StatusTicks from '@/components/inbox/status-ticks';
++import { formatTime } from '@/lib/format';
++import { cn } from '@/lib/utils';
++import { type ChatMessage } from '@/types/whatsapp';
++import { FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
++
++const mediaIcon: Record<string, typeof ImageIcon> = { image: ImageIcon, video: Video, document: FileText, audio: Mic, sticker: ImageIcon };
++
++function Content({ m }: { m: ChatMessage }) {
++    const b = m.body ?? {};
++
++    if (b.media) {
++        const Icon = mediaIcon[b.media.type] ?? FileText;
++        return (
++            <div className="space-y-1">
++                {b.media.type === 'image' && b.media.link ? (
++                    <img src={b.media.link} alt={b.media.caption ?? ''} className="max-h-72 rounded-md" />
++                ) : (
++                    <div className="flex items-center gap-2 rounded-md bg-black/5 px-2.5 py-2 text-sm">
++                        <Icon className="size-4 shrink-0" />
++                        <span className="truncate">{b.media.filename ?? b.media.link ?? `${b.media.type}${b.media.id ? ` · ${b.media.id}` : ''}`}</span>
++                    </div>
++                )}
++                {b.media.caption && <p className="text-sm whitespace-pre-wrap">{b.media.caption}</p>}
++            </div>
++        );
++    }
++    if (b.location) {
++        return (
++            <a className="flex items-center gap-2 text-sm underline-offset-2 hover:underline" target="_blank" rel="noreferrer" href={`https://maps.google.com/?q=${b.location.latitude},${b.location.longitude}`}>
++                <MapPin className="size-4 shrink-0" /> {b.location.name || `${b.location.latitude}, ${b.location.longitude}`}
++            </a>
++        );
++    }
++    if (b.template) {
++        return (
++            <div className="space-y-1">
++                <p className="flex items-center gap-1 text-[11px] font-semibold tracking-wide text-[#2b4a08] uppercase">
++                    <LayoutTemplate className="size-3" /> Template · {b.template.name}
++                </p>
++                <p className="text-sm whitespace-pre-wrap">{b.template.text?.replace(/^Template [^:]+: /, '')}</p>
++            </div>
++        );
++    }
++    return <p className="text-sm break-words whitespace-pre-wrap">{b.text ?? m.preview ?? `(${m.type})`}</p>;
++}
++
++export default function MessageBubble({ m, onReply }: { m: ChatMessage; onReply?: (m: ChatMessage) => void }) {
++    const out = m.direction === 'outbound';
++
++    return (
++        <div className={cn('group flex w-full', out ? 'justify-end' : 'justify-start')}>
++            <div
++                className={cn(
++                    'relative max-w-[78%] rounded-lg px-3 py-1.5 shadow-sm md:max-w-[65%]',
++                    out ? 'rounded-tr-none bg-[#d9fdd3]' : 'rounded-tl-none bg-white',
++                    m.status === 'failed' && 'ring-1 ring-red-300',
++                )}
++                onDoubleClick={() => onReply?.(m)}
++                title="Double-click to reply"
++            >
++                {m.context_wamid && <p className="mb-1 border-l-2 border-brand bg-black/5 px-2 py-1 text-[11px] text-muted-foreground">Reply</p>}
++                <Content m={m} />
++                <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] text-muted-foreground">
++                    <span>{formatTime(m.timestamp)}</span>
++                    {out && <StatusTicks status={m.status} pending={m.pending} />}
++                </div>
++                {m.status === 'failed' && (
++                    <p className="mt-1 rounded bg-red-50 px-2 py-1 text-[11px] text-red-700">
++                        Not delivered{m.error_code ? ` (#${m.error_code})` : ''}: {m.error_message ?? 'unknown error'}
++                    </p>
++                )}
++            </div>
++        </div>
++    );
++}
+diff --git a/resources/js/components/inbox/status-ticks.tsx b/resources/js/components/inbox/status-ticks.tsx
+new file mode 100644
+index 0000000..ffb093b
+--- /dev/null
++++ b/resources/js/components/inbox/status-ticks.tsx
+@@ -0,0 +1,11 @@
++import { cn } from '@/lib/utils';
++import { AlertCircle, Check, CheckCheck, Clock } from 'lucide-react';
++
++/** WhatsApp-style delivery ticks for outbound messages. */
++export default function StatusTicks({ status, pending, className }: { status: string; pending?: boolean; className?: string }) {
++    if (pending || status === 'pending') return <Clock className={cn('size-3.5 text-muted-foreground', className)} />;
++    if (status === 'failed') return <AlertCircle className={cn('size-3.5 text-red-500', className)} />;
++    if (status === 'read') return <CheckCheck className={cn('size-3.5 text-[#53bdeb]', className)} />;
++    if (status === 'delivered') return <CheckCheck className={cn('size-3.5 text-muted-foreground', className)} />;
++    return <Check className={cn('size-3.5 text-muted-foreground', className)} />;
++}
+diff --git a/resources/js/components/inbox/template-dialog.tsx b/resources/js/components/inbox/template-dialog.tsx
+new file mode 100644
+index 0000000..3479df5
+--- /dev/null
++++ b/resources/js/components/inbox/template-dialog.tsx
+@@ -0,0 +1,167 @@
++import Field from '@/components/field';
++import { Button } from '@/components/ui/button';
++import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
++import { Input } from '@/components/ui/input';
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
++import WhatsAppPreview from '@/components/whatsapp-preview';
++import { countVariables, fillVariables } from '@/lib/format';
++import { type InboxTemplate } from '@/types/whatsapp';
++import { Loader2, Send } from 'lucide-react';
++import { useEffect, useMemo, useState } from 'react';
++
++export type TemplateInput = {
++    id: string;
++    header: Record<string, string>;
++    body: string[];
++    buttons: { index: number; sub_type: string; payload?: string; text?: string; coupon_code?: string }[];
++};
++
++interface Props {
++    open: boolean;
++    onOpenChange: (open: boolean) => void;
++    templates: InboxTemplate[];
++    contactName: string;
++    sending: boolean;
++    error?: string | null;
++    onSend: (input: TemplateInput) => Promise<void> | void;
++}
++
++export default function TemplateDialog({ open, onOpenChange, templates, contactName, sending, error, onSend }: Props) {
++    const [input, setInput] = useState<TemplateInput>({ id: '', header: {}, body: [], buttons: [] });
++    const template = templates.find((t) => String(t.id) === input.id);
++
++    useEffect(() => {
++        if (open && !input.id && templates[0]) select(String(templates[0].id));
++        // eslint-disable-next-line react-hooks/exhaustive-deps
++    }, [open, templates]);
++
++    const header = template?.components.find((c) => c.type === 'HEADER');
++    const body = template?.components.find((c) => c.type === 'BODY');
++    const footer = template?.components.find((c) => c.type === 'FOOTER');
++    const buttons = useMemo(() => template?.components.find((c) => c.type === 'BUTTONS')?.buttons ?? [], [template]);
++    const isAuth = template?.category === 'AUTHENTICATION';
++    const bodyVars = isAuth ? 1 : countVariables(body?.text);
++    const headerVars = header?.format === 'TEXT' ? countVariables(header.text) : 0;
++
++    function select(id: string) {
++        const t = templates.find((x) => String(x.id) === id);
++        const btns = (t?.components.find((c) => c.type === 'BUTTONS')?.buttons ?? [])
++            .map((b, index) => ({ index, type: b.type, url: b.url }))
++            .filter((b) => b.type === 'QUICK_REPLY' || (b.type === 'URL' && (b.url ?? '').includes('{{1}}')) || b.type === 'COPY_CODE')
++            .map((b) => ({ index: b.index, sub_type: b.type.toLowerCase(), payload: '', text: '', coupon_code: '' }));
++        setInput({ id, header: {}, body: [], buttons: btns });
++    }
++
++    const ready = !!template && (bodyVars === 0 || input.body.slice(0, bodyVars).every((v) => v && v.trim() !== '')) && (headerVars === 0 || !!input.header.text) && (!header || ['TEXT', 'LOCATION'].includes(header.format ?? 'TEXT') || !!(input.header.link || input.header.id));
++
++    return (
++        <Dialog open={open} onOpenChange={onOpenChange}>
++            <DialogContent className="max-w-3xl">
++                <DialogHeader>
++                    <DialogTitle>Send a template to {contactName}</DialogTitle>
++                    <DialogDescription>Only APPROVED templates can be sent. A delivered template opens the 24-hour window for free-form replies.</DialogDescription>
++                </DialogHeader>
++
++                {templates.length === 0 ? (
++                    <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No approved templates for this sender's account yet. Create one under Templates and wait for Meta's approval.</p>
++                ) : (
++                    <div className="grid gap-5 md:grid-cols-2">
++                        <div className="space-y-4">
++                            <Field label="Template" required>
++                                <Select value={input.id} onValueChange={select}>
++                                    <SelectTrigger>
++                                        <SelectValue placeholder="Choose a template" />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        {templates.map((t) => (
++                                            <SelectItem key={t.id} value={String(t.id)}>
++                                                {t.name} · {t.language} · {t.category}
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                            </Field>
++
++                            {header && !['TEXT', 'LOCATION'].includes(header.format ?? 'TEXT') && (
++                                <Field label={`${header.format} header`} hint="Public URL or an uploaded media ID." required>
++                                    <Input placeholder="https://… or media ID" value={input.header.link ?? ''} onChange={(e) => setInput({ ...input, header: { ...input.header, link: e.target.value } })} />
++                                </Field>
++                            )}
++                            {header?.format === 'LOCATION' && (
++                                <div className="grid grid-cols-2 gap-2">
++                                    {['latitude', 'longitude', 'name', 'address'].map((k) => (
++                                        <Input key={k} placeholder={k} value={input.header[k] ?? ''} onChange={(e) => setInput({ ...input, header: { ...input.header, [k]: e.target.value } })} />
++                                    ))}
++                                </div>
++                            )}
++                            {headerVars > 0 && (
++                                <Field label="Header variable {{1}}" required>
++                                    <Input value={input.header.text ?? ''} onChange={(e) => setInput({ ...input, header: { ...input.header, text: e.target.value } })} />
++                                </Field>
++                            )}
++                            {bodyVars > 0 && (
++                                <div className="space-y-2">
++                                    <p className="text-sm font-medium">{isAuth ? 'One-time password' : 'Body variables'}</p>
++                                    {Array.from({ length: bodyVars }).map((_, i) => (
++                                        <div key={i} className="flex items-center gap-2">
++                                            <span className="w-12 shrink-0 font-mono text-xs text-muted-foreground">{`{{${i + 1}}}`}</span>
++                                            <Input
++                                                value={input.body[i] ?? ''}
++                                                onChange={(e) => {
++                                                    const next = [...input.body];
++                                                    next[i] = e.target.value;
++                                                    setInput({ ...input, body: next });
++                                                }}
++                                            />
++                                        </div>
++                                    ))}
++                                </div>
++                            )}
++                            {!isAuth && input.buttons.length > 0 && (
++                                <div className="space-y-2">
++                                    <p className="text-sm font-medium">Button parameters</p>
++                                    {input.buttons.map((b, i) => (
++                                        <div key={i} className="flex items-center gap-2">
++                                            <span className="w-24 shrink-0 text-xs text-muted-foreground">
++                                                #{b.index} {b.sub_type}
++                                            </span>
++                                            <Input
++                                                placeholder={b.sub_type === 'quick_reply' ? 'payload' : b.sub_type === 'url' ? 'URL suffix {{1}}' : 'coupon code'}
++                                                value={b.sub_type === 'quick_reply' ? (b.payload ?? '') : b.sub_type === 'url' ? (b.text ?? '') : (b.coupon_code ?? '')}
++                                                onChange={(e) => {
++                                                    const key = b.sub_type === 'quick_reply' ? 'payload' : b.sub_type === 'url' ? 'text' : 'coupon_code';
++                                                    const next = [...input.buttons];
++                                                    next[i] = { ...b, [key]: e.target.value };
++                                                    setInput({ ...input, buttons: next });
++                                                }}
++                                            />
++                                        </div>
++                                    ))}
++                                </div>
++                            )}
++                        </div>
++                        <div>
++                            <WhatsAppPreview
++                                header={header ? { format: header.format ?? 'TEXT', text: fillVariables(header.text ?? '', [input.header.text ?? '']) } : null}
++                                body={isAuth ? `${input.body[0] || '{{1}}'} is your verification code.` : fillVariables(body?.text ?? '', input.body)}
++                                footer={footer?.text}
++                                buttons={buttons}
++                            />
++                        </div>
++                    </div>
++                )}
++
++                {error && <p className="rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-700">{error}</p>}
++
++                <DialogFooter>
++                    <Button variant="outline" type="button" onClick={() => onOpenChange(false)}>
++                        Cancel
++                    </Button>
++                    <Button type="button" disabled={!ready || sending} onClick={() => onSend(input)}>
++                        {sending ? <Loader2 className="animate-spin" /> : <Send />} Send template
++                    </Button>
++                </DialogFooter>
++            </DialogContent>
++        </Dialog>
++    );
++}
+diff --git a/resources/js/components/inbox/window-badge.tsx b/resources/js/components/inbox/window-badge.tsx
+new file mode 100644
+index 0000000..74c2991
+--- /dev/null
++++ b/resources/js/components/inbox/window-badge.tsx
+@@ -0,0 +1,21 @@
++import { formatCountdown } from '@/lib/format';
++import { cn } from '@/lib/utils';
++import { type WindowState } from '@/types/whatsapp';
++import { Lock, Unlock } from 'lucide-react';
++
++/** Compact 24-hour window indicator used in the list, header and contacts table. */
++export default function WindowBadge({ window, secondsLeft, compact = false, className }: { window: WindowState; secondsLeft?: number; compact?: boolean; className?: string }) {
++    const left = secondsLeft ?? window.seconds_left;
++    const open = window.open && left > 0;
++
++    if (compact) {
++        return <span className={cn('inline-block size-2 rounded-full', open ? 'bg-brand' : 'bg-zinc-300', className)} title={open ? `Window open · ${formatCountdown(left)} left` : 'Window closed'} />;
++    }
++
++    return (
++        <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium', open ? 'border-brand bg-brand-soft text-[#2b4a08]' : 'border-zinc-200 bg-zinc-50 text-zinc-600', className)}>
++            {open ? <Unlock className="size-3" /> : <Lock className="size-3" />}
++            {open ? `Window open · ${formatCountdown(left)} left` : window.has_history ? '24-hour window closed' : 'No conversation yet'}
++        </span>
++    );
++}
+diff --git a/resources/js/lib/format.ts b/resources/js/lib/format.ts
+index 4419720..815911b 100644
+--- a/resources/js/lib/format.ts
++++ b/resources/js/lib/format.ts
+@@ -30,3 +30,43 @@ export function fillVariables(text: string, values: string[]): string {
+         return v && v.trim() !== '' ? v : `{{${n}}}`;
+     });
+ }
++
++export function formatTime(value?: string | null): string {
++    if (!value) return '';
++    const d = new Date(value);
++    return Number.isNaN(d.getTime()) ? '' : d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
++}
++
++/** "Today", "Yesterday" or a date — used for chat day separators. */
++export function formatDayLabel(value: string): string {
++    const d = new Date(value);
++    const today = new Date();
++    const yesterday = new Date();
++    yesterday.setDate(today.getDate() - 1);
++    const same = (a: Date, b: Date) => a.toDateString() === b.toDateString();
++    if (same(d, today)) return 'Today';
++    if (same(d, yesterday)) return 'Yesterday';
++    return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
++}
++
++/** "5h 12m" style countdown from seconds. */
++export function formatCountdown(seconds: number): string {
++    if (seconds <= 0) return '0m';
++    const h = Math.floor(seconds / 3600);
++    const m = Math.floor((seconds % 3600) / 60);
++    if (h > 0) return `${h}h ${m}m`;
++    if (m > 0) return `${m}m`;
++    return `${seconds}s`;
++}
++
++/** Relative time for conversation lists: "12:40", "Yesterday", "Mon", "3 Sep". */
++export function formatListTime(value?: string | null): string {
++    if (!value) return '';
++    const d = new Date(value);
++    const now = new Date();
++    if (d.toDateString() === now.toDateString()) return formatTime(value);
++    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
++    if (diffDays < 1) return 'Yesterday';
++    if (diffDays < 7) return d.toLocaleDateString(undefined, { weekday: 'short' });
++    return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
++}
+diff --git a/resources/js/lib/http.ts b/resources/js/lib/http.ts
+new file mode 100644
+index 0000000..2b0cc95
+--- /dev/null
++++ b/resources/js/lib/http.ts
+@@ -0,0 +1,32 @@
++/** Minimal JSON fetch helper for same-origin Laravel routes (CSRF via the XSRF-TOKEN cookie). */
++export class HttpError extends Error {
++    constructor(
++        public status: number,
++        public data: Record<string, unknown>,
++    ) {
++        super((data?.message as string) || (data?.error as string) || `Request failed (${status})`);
++    }
++}
++
++function xsrf(): string {
++    return decodeURIComponent(document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1] ?? '');
++}
++
++export async function http<T = unknown>(url: string, init: RequestInit & { json?: unknown } = {}): Promise<T> {
++    const { json, headers, ...rest } = init;
++    const res = await fetch(url, {
++        credentials: 'same-origin',
++        ...rest,
++        headers: {
++            Accept: 'application/json',
++            'X-Requested-With': 'XMLHttpRequest',
++            'X-XSRF-TOKEN': xsrf(),
++            ...(json !== undefined ? { 'Content-Type': 'application/json' } : {}),
++            ...(headers ?? {}),
++        },
++        body: json !== undefined ? JSON.stringify(json) : rest.body,
++    });
++    const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
++    if (!res.ok) throw new HttpError(res.status, data);
++    return data as T;
++}
+diff --git a/resources/js/pages/contacts/form.tsx b/resources/js/pages/contacts/form.tsx
+new file mode 100644
+index 0000000..072f77e
+--- /dev/null
++++ b/resources/js/pages/contacts/form.tsx
+@@ -0,0 +1,167 @@
++import Field from '@/components/field';
++import FlashMessages from '@/components/flash-messages';
++import WindowBadge from '@/components/inbox/window-badge';
++import PageHeader from '@/components/page-header';
++import { Button } from '@/components/ui/button';
++import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
++import { Textarea } from '@/components/ui/textarea';
++import AppLayout from '@/layouts/app-layout';
++import { type BreadcrumbItem } from '@/types';
++import { type ContactRow } from '@/types/whatsapp';
++import { Head, Link, useForm } from '@inertiajs/react';
++import { Loader2, MessageSquareText, Save, X } from 'lucide-react';
++import { FormEvent, useState } from 'react';
++
++interface Props {
++    contact: (ContactRow & { notes: string | null; phone_number_id: number | null }) | null;
++    phones: { id: number; label: string }[];
++}
++
++type FormData = { name: string; phone: string; email: string; company: string; tags: string[]; notes: string; phone_number_id: string };
++
++export default function ContactForm({ contact, phones }: Props) {
++    const editing = !!contact;
++    const breadcrumbs: BreadcrumbItem[] = [
++        { title: 'Contacts', href: '/contacts' },
++        { title: editing ? contact.display_name : 'New contact', href: editing ? route('contacts.edit', contact.id) : route('contacts.create') },
++    ];
++
++    const form = useForm<FormData>({
++        name: contact?.name ?? '',
++        phone: contact?.phone ?? '+971',
++        email: contact?.email ?? '',
++        company: contact?.company ?? '',
++        tags: contact?.tags ?? [],
++        notes: contact?.notes ?? '',
++        phone_number_id: contact?.phone_number_id ? String(contact.phone_number_id) : '',
++    });
++    const { data, setData, errors, processing } = form;
++    const [tagInput, setTagInput] = useState('');
++
++    const addTag = () => {
++        const t = tagInput.trim();
++        if (t && !data.tags.includes(t)) setData('tags', [...data.tags, t]);
++        setTagInput('');
++    };
++
++    const submit = (e: FormEvent) => {
++        e.preventDefault();
++        form.transform((d) => ({ ...d, phone_number_id: d.phone_number_id || null }));
++        if (editing) form.put(route('contacts.update', contact.id));
++        else form.post(route('contacts.store'));
++    };
++
++    return (
++        <AppLayout breadcrumbs={breadcrumbs}>
++            <Head title={editing ? `Edit ${contact.display_name}` : 'New contact'} />
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <PageHeader
++                    title={editing ? contact.display_name : 'New contact'}
++                    description={editing ? 'Update the contact details. The WhatsApp number identifies the conversation.' : 'A contact must exist before you can message a number. The first message must be an approved template.'}
++                    actions={
++                        editing ? (
++                            <>
++                                <WindowBadge window={contact.window} />
++                                <Button asChild variant="outline">
++                                    <Link href={route('inbox.show', contact.id)}>
++                                        <MessageSquareText /> Open chat
++                                    </Link>
++                                </Button>
++                            </>
++                        ) : undefined
++                    }
++                />
++                <FlashMessages />
++
++                <form onSubmit={submit} className="grid gap-6 lg:grid-cols-3">
++                    <Card className="lg:col-span-2">
++                        <CardHeader>
++                            <CardTitle className="text-base">Details</CardTitle>
++                        </CardHeader>
++                        <CardContent className="grid gap-4 sm:grid-cols-2">
++                            <Field label="Name" error={errors.name} required>
++                                <Input value={data.name} onChange={(e) => setData('name', e.target.value)} autoFocus />
++                            </Field>
++                            <Field label="WhatsApp number" error={errors.phone ?? (errors as Record<string, string>).wa_id} hint="International format with country code, e.g. +971501234567" required>
++                                <Input value={data.phone} onChange={(e) => setData('phone', e.target.value)} placeholder="+9715XXXXXXXX" />
++                            </Field>
++                            <Field label="Email" error={errors.email}>
++                                <Input type="email" value={data.email} onChange={(e) => setData('email', e.target.value)} />
++                            </Field>
++                            <Field label="Company" error={errors.company}>
++                                <Input value={data.company} onChange={(e) => setData('company', e.target.value)} />
++                            </Field>
++                            <Field label="Tags" error={errors.tags} hint="Press Enter to add">
++                                <div className="flex flex-wrap items-center gap-1.5 rounded-md border px-2 py-1.5">
++                                    {data.tags.map((t) => (
++                                        <span key={t} className="inline-flex items-center gap-1 rounded-full bg-brand-soft px-2 py-0.5 text-xs text-[#2b4a08]">
++                                            {t}
++                                            <button type="button" onClick={() => setData('tags', data.tags.filter((x) => x !== t))}>
++                                                <X className="size-3" />
++                                            </button>
++                                        </span>
++                                    ))}
++                                    <input
++                                        value={tagInput}
++                                        onChange={(e) => setTagInput(e.target.value)}
++                                        onKeyDown={(e) => {
++                                            if (e.key === 'Enter' || e.key === ',') {
++                                                e.preventDefault();
++                                                addTag();
++                                            }
++                                        }}
++                                        onBlur={addTag}
++                                        className="min-w-24 flex-1 bg-transparent text-sm outline-none"
++                                        placeholder={data.tags.length ? '' : 'lead, vip, support…'}
++                                    />
++                                </div>
++                            </Field>
++                            {phones.length > 0 && (
++                                <Field label="Preferred sender" error={errors.phone_number_id} hint="Business number used for this conversation by default.">
++                                    <Select value={data.phone_number_id || 'none'} onValueChange={(v) => setData('phone_number_id', v === 'none' ? '' : v)}>
++                                        <SelectTrigger>
++                                            <SelectValue />
++                                        </SelectTrigger>
++                                        <SelectContent>
++                                            <SelectItem value="none">Default number</SelectItem>
++                                            {phones.map((p) => (
++                                                <SelectItem key={p.id} value={String(p.id)}>
++                                                    {p.label}
++                                                </SelectItem>
++                                            ))}
++                                        </SelectContent>
++                                    </Select>
++                                </Field>
++                            )}
++                            <div className="sm:col-span-2">
++                                <Field label="Notes" error={errors.notes}>
++                                    <Textarea rows={4} value={data.notes} onChange={(e) => setData('notes', e.target.value)} />
++                                </Field>
++                            </div>
++                        </CardContent>
++                    </Card>
++
++                    <div className="space-y-4">
++                        <Card>
++                            <CardContent className="space-y-3 p-4 text-sm text-muted-foreground">
++                                <p className="font-medium text-foreground">How messaging works</p>
++                                <p>New contacts can only receive an approved template first. A sent template — or any message from the customer — opens a 24-hour window for free-form replies.</p>
++                                <p>When the window closes, the chat shows “24-hour window has been closed” and you send another template to reopen it.</p>
++                            </CardContent>
++                        </Card>
++                        <div className="flex gap-2">
++                            <Button type="submit" disabled={processing} className="flex-1">
++                                {processing ? <Loader2 className="animate-spin" /> : <Save />} {editing ? 'Save changes' : 'Create contact'}
++                            </Button>
++                            <Button asChild type="button" variant="outline">
++                                <Link href={route('contacts.index')}>Cancel</Link>
++                            </Button>
++                        </div>
++                    </div>
++                </form>
++            </div>
++        </AppLayout>
++    );
++}
+diff --git a/resources/js/pages/contacts/index.tsx b/resources/js/pages/contacts/index.tsx
+new file mode 100644
+index 0000000..e2eba29
+--- /dev/null
++++ b/resources/js/pages/contacts/index.tsx
+@@ -0,0 +1,188 @@
++import FlashMessages from '@/components/flash-messages';
++import WindowBadge from '@/components/inbox/window-badge';
++import PageHeader from '@/components/page-header';
++import Pagination from '@/components/pagination';
++import { Button } from '@/components/ui/button';
++import { Card, CardContent } from '@/components/ui/card';
++import { Input } from '@/components/ui/input';
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
++import AppLayout from '@/layouts/app-layout';
++import { formatListTime } from '@/lib/format';
++import { type BreadcrumbItem, type Paginated } from '@/types';
++import { type ContactRow } from '@/types/whatsapp';
++import { Head, Link, router } from '@inertiajs/react';
++import { MessageSquareText, Pencil, Plus, Trash2 } from 'lucide-react';
++import { useState } from 'react';
++
++const breadcrumbs: BreadcrumbItem[] = [{ title: 'Contacts', href: '/contacts' }];
++
++interface Props {
++    contacts: Paginated<ContactRow>;
++    filters: { q?: string; window?: string; tag?: string };
++    tags: string[];
++    stats: { total: number; open_windows: number; unread: number };
++}
++
++export default function ContactsIndex({ contacts, filters, tags, stats }: Props) {
++    const [q, setQ] = useState(filters.q ?? '');
++    const apply = (next: Partial<Props['filters']>) => router.get(route('contacts.index'), { ...filters, ...next, q: q || undefined }, { preserveState: true, replace: true });
++
++    return (
++        <AppLayout breadcrumbs={breadcrumbs}>
++            <Head title="Contacts" />
++            <div className="flex flex-1 flex-col gap-6 p-4 md:p-6">
++                <PageHeader
++                    title="Contacts"
++                    description="Every WhatsApp number you talk to. Contacts are created here or automatically when someone messages your business number."
++                    actions={
++                        <Button asChild>
++                            <Link href={route('contacts.create')}>
++                                <Plus /> New contact
++                            </Link>
++                        </Button>
++                    }
++                />
++                <FlashMessages />
++
++                <div className="grid grid-cols-3 gap-3">
++                    {[
++                        { label: 'Contacts', value: stats.total },
++                        { label: 'Open windows', value: stats.open_windows },
++                        { label: 'Unread', value: stats.unread },
++                    ].map((s) => (
++                        <Card key={s.label}>
++                            <CardContent className="p-4">
++                                <p className="text-xs text-muted-foreground uppercase">{s.label}</p>
++                                <p className="text-2xl font-semibold">{s.value}</p>
++                            </CardContent>
++                        </Card>
++                    ))}
++                </div>
++
++                <Card>
++                    <CardContent className="p-4">
++                        <div className="flex flex-wrap items-center gap-2">
++                            <form
++                                onSubmit={(e) => {
++                                    e.preventDefault();
++                                    apply({});
++                                }}
++                                className="flex flex-1 gap-2"
++                            >
++                                <Input placeholder="Search name, number, email, company…" value={q} onChange={(e) => setQ(e.target.value)} className="max-w-sm" />
++                                <Button type="submit" variant="outline">
++                                    Search
++                                </Button>
++                            </form>
++                            <Select value={filters.window ?? 'all'} onValueChange={(v) => apply({ window: v === 'all' ? undefined : v })}>
++                                <SelectTrigger className="w-44">
++                                    <SelectValue />
++                                </SelectTrigger>
++                                <SelectContent>
++                                    <SelectItem value="all">Any window</SelectItem>
++                                    <SelectItem value="open">Window open</SelectItem>
++                                    <SelectItem value="closed">Window closed</SelectItem>
++                                </SelectContent>
++                            </Select>
++                            {tags.length > 0 && (
++                                <Select value={filters.tag ?? 'all'} onValueChange={(v) => apply({ tag: v === 'all' ? undefined : v })}>
++                                    <SelectTrigger className="w-40">
++                                        <SelectValue />
++                                    </SelectTrigger>
++                                    <SelectContent>
++                                        <SelectItem value="all">All tags</SelectItem>
++                                        {tags.map((t) => (
++                                            <SelectItem key={t} value={t}>
++                                                {t}
++                                            </SelectItem>
++                                        ))}
++                                    </SelectContent>
++                                </Select>
++                            )}
++                        </div>
++
++                        <div className="mt-4 overflow-x-auto">
++                            <table className="w-full text-sm">
++                                <thead className="text-left text-xs text-muted-foreground uppercase">
++                                    <tr>
++                                        <th className="py-2 pr-3">Contact</th>
++                                        <th className="py-2 pr-3">Tags</th>
++                                        <th className="py-2 pr-3">Conversation window</th>
++                                        <th className="py-2 pr-3">Last message</th>
++                                        <th className="py-2 pr-3">Source</th>
++                                        <th className="py-2 text-right">Actions</th>
++                                    </tr>
++                                </thead>
++                                <tbody className="divide-y">
++                                    {contacts.data.length === 0 && (
++                                        <tr>
++                                            <td colSpan={6} className="py-10 text-center text-muted-foreground">
++                                                No contacts found.
++                                            </td>
++                                        </tr>
++                                    )}
++                                    {contacts.data.map((c) => (
++                                        <tr key={c.id} className="hover:bg-muted/40">
++                                            <td className="py-2.5 pr-3">
++                                                <div className="flex items-center gap-3">
++                                                    <div className="flex size-9 shrink-0 items-center justify-center rounded-full bg-zinc-200 text-xs font-semibold text-zinc-700">{c.initials}</div>
++                                                    <div className="min-w-0">
++                                                        <p className="truncate font-medium">{c.display_name}</p>
++                                                        <p className="truncate font-mono text-xs text-muted-foreground">
++                                                            {c.phone}
++                                                            {c.company ? ` · ${c.company}` : ''}
++                                                        </p>
++                                                    </div>
++                                                </div>
++                                            </td>
++                                            <td className="py-2.5 pr-3">
++                                                <div className="flex flex-wrap gap-1">
++                                                    {c.tags.map((t) => (
++                                                        <span key={t} className="rounded-full bg-zinc-100 px-2 py-0.5 text-[11px]">
++                                                            {t}
++                                                        </span>
++                                                    ))}
++                                                </div>
++                                            </td>
++                                            <td className="py-2.5 pr-3">
++                                                <WindowBadge window={c.window} />
++                                            </td>
++                                            <td className="max-w-xs py-2.5 pr-3">
++                                                <p className="truncate text-muted-foreground" title={c.last_message_preview ?? ''}>
++                                                    {c.last_message_preview ?? '—'}
++                                                </p>
++                                                <p className="text-xs text-muted-foreground">
++                                                    {formatListTime(c.last_message_at)}
++                                                    {c.unread_count > 0 && <span className="ml-2 rounded-full bg-brand px-1.5 text-[10px] font-bold text-[#14200a]">{c.unread_count} new</span>}
++                                                </p>
++                                            </td>
++                                            <td className="py-2.5 pr-3 text-xs text-muted-foreground capitalize">{c.source}</td>
++                                            <td className="py-2.5">
++                                                <div className="flex justify-end gap-1">
++                                                    <Button asChild size="sm" variant="ghost" title="Open chat">
++                                                        <Link href={route('inbox.show', c.id)}>
++                                                            <MessageSquareText />
++                                                        </Link>
++                                                    </Button>
++                                                    <Button asChild size="sm" variant="ghost" title="Edit">
++                                                        <Link href={route('contacts.edit', c.id)}>
++                                                            <Pencil />
++                                                        </Link>
++                                                    </Button>
++                                                    <Button size="sm" variant="ghost" title="Delete" onClick={() => confirm(`Delete ${c.display_name}? Messages are kept in the log.`) && router.delete(route('contacts.destroy', c.id), { preserveScroll: true })}>
++                                                        <Trash2 className="text-red-500" />
++                                                    </Button>
++                                                </div>
++                                            </td>
++                                        </tr>
++                                    ))}
++                                </tbody>
++                            </table>
++                        </div>
++                        <Pagination paginator={contacts} />
++                    </CardContent>
++                </Card>
++            </div>
++        </AppLayout>
++    );
++}
+diff --git a/resources/js/pages/inbox/index.tsx b/resources/js/pages/inbox/index.tsx
+new file mode 100644
+index 0000000..f7548cc
+--- /dev/null
++++ b/resources/js/pages/inbox/index.tsx
+@@ -0,0 +1,359 @@
++import Composer from '@/components/inbox/composer';
++import ConversationList from '@/components/inbox/conversation-list';
++import MessageBubble from '@/components/inbox/message-bubble';
++import TemplateDialog, { type TemplateInput } from '@/components/inbox/template-dialog';
++import WindowBadge from '@/components/inbox/window-badge';
++import { Button } from '@/components/ui/button';
++import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
++import AppLayout from '@/layouts/app-layout';
++import { formatDayLabel } from '@/lib/format';
++import { http, HttpError } from '@/lib/http';
++import { cn } from '@/lib/utils';
++import { type BreadcrumbItem } from '@/types';
++import { type ChatMessage, type ContactRow, type InboxPhone, type InboxTemplate } from '@/types/whatsapp';
++import { Head, Link, router } from '@inertiajs/react';
++import { ArrowLeft, ChevronUp, Loader2, MessageSquareText, Pencil, RefreshCw } from 'lucide-react';
++import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
++
++interface Props {
++    conversations: ContactRow[];
++    phones: InboxPhone[];
++    templates: InboxTemplate[];
++    selected: { contact: ContactRow; messages: ChatMessage[]; has_more: boolean } | null;
++    filters: { q?: string };
++    poll_interval_ms: number;
++}
++
++const breadcrumbs: BreadcrumbItem[] = [{ title: 'Inbox', href: '/inbox' }];
++
++type SendBody = { type: string; phone_number_id?: number; reply_to?: string | null; text?: { body: string }; template?: TemplateInput; media?: { source: 'id'; id: string; caption?: string; filename?: string } };
++
++export default function Inbox({ conversations: initialConversations, phones, templates, selected, filters, poll_interval_ms }: Props) {
++    const [conversations, setConversations] = useState<ContactRow[]>(initialConversations);
++    const [query, setQuery] = useState(filters.q ?? '');
++    const [contact, setContact] = useState<ContactRow | null>(selected?.contact ?? null);
++    const [messages, setMessages] = useState<ChatMessage[]>(selected?.messages ?? []);
++    const [hasMore, setHasMore] = useState(selected?.has_more ?? false);
++    const [loadingOlder, setLoadingOlder] = useState(false);
++    const [sending, setSending] = useState(false);
++    const [error, setError] = useState<string | null>(null);
++    const [replyTo, setReplyTo] = useState<ChatMessage | null>(null);
++    const [templateOpen, setTemplateOpen] = useState(false);
++    const [phoneId, setPhoneId] = useState<number | null>(phones.find((p) => p.is_default)?.id ?? phones[0]?.id ?? null);
++    const [now, setNow] = useState(() => Date.now());
++
++    const scrollRef = useRef<HTMLDivElement>(null);
++    const lastServerTime = useRef<string | null>(null);
++    const stickToBottom = useRef(true);
++
++    /* Reset chat state whenever the selected contact changes (Inertia partial reload) */
++    useEffect(() => {
++        setContact(selected?.contact ?? null);
++        setMessages(selected?.messages ?? []);
++        setHasMore(selected?.has_more ?? false);
++        setReplyTo(null);
++        setError(null);
++        lastServerTime.current = null;
++        stickToBottom.current = true;
++        if (selected?.contact) {
++            http(route('inbox.read', selected.contact.id), { method: 'POST' }).catch(() => undefined);
++            setConversations((list) => list.map((c) => (c.id === selected.contact.id ? { ...c, unread_count: 0 } : c)));
++        }
++    }, [selected]);
++
++    /* Auto-scroll */
++    useEffect(() => {
++        if (stickToBottom.current && scrollRef.current) {
++            scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
++        }
++    }, [messages, contact?.id]);
++
++    const onScroll = () => {
++        const el = scrollRef.current;
++        if (!el) return;
++        stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
++    };
++
++    /* Merge helper: new ids appended, updated rows replaced, optimistic rows dropped when confirmed */
++    const merge = useCallback((incoming: ChatMessage[]) => {
++        if (incoming.length === 0) return;
++        setMessages((prev) => {
++            const byId = new Map(prev.map((m) => [m.id, m]));
++            for (const m of incoming) byId.set(m.id, m);
++            return Array.from(byId.values())
++                .filter((m) => !(m.pending && incoming.some((i) => i.wamid && i.direction === 'outbound' && i.preview === m.preview)))
++                .sort((a, b) => a.id - b.id);
++        });
++    }, []);
++
++    /* Polling: messages of the open chat + the conversation list */
++    useEffect(() => {
++        let cancelled = false;
++        const tick = async () => {
++            if (document.hidden || cancelled) return;
++            try {
++                if (contact) {
++                    const lastId = messages.filter((m) => !m.pending).reduce((max, m) => Math.max(max, m.id), 0);
++                    const params = new URLSearchParams({ after: String(lastId) });
++                    if (lastServerTime.current) params.set('since', lastServerTime.current);
++                    const res = await http<{ messages: ChatMessage[]; contact: ContactRow; server_time: string }>(`${route('inbox.messages', contact.id)}?${params}`);
++                    if (cancelled) return;
++                    lastServerTime.current = res.server_time;
++                    merge(res.messages);
++                    setContact(res.contact);
++                    if (res.messages.some((m) => m.direction === 'inbound') && !document.hidden) {
++                        http(route('inbox.read', contact.id), { method: 'POST' }).catch(() => undefined);
++                    }
++                }
++                const list = await http<{ conversations: ContactRow[] }>(`${route('inbox.conversations')}?q=${encodeURIComponent(query)}`);
++                if (!cancelled) setConversations(list.conversations.map((c) => (contact && c.id === contact.id ? { ...c, unread_count: 0 } : c)));
++            } catch {
++                /* transient network error – try again next tick */
++            }
++        };
++        const id = window.setInterval(tick, poll_interval_ms);
++        return () => {
++            cancelled = true;
++            window.clearInterval(id);
++        };
++    }, [contact, messages, query, poll_interval_ms, merge]);
++
++    /* Countdown re-render every 30s */
++    useEffect(() => {
++        const id = window.setInterval(() => setNow(Date.now()), 30_000);
++        return () => window.clearInterval(id);
++    }, []);
++
++    const secondsLeft = useMemo(() => {
++        if (!contact?.window.expires_at) return 0;
++        return Math.max(0, Math.floor((new Date(contact.window.expires_at).getTime() - now) / 1000));
++    }, [contact, now]);
++
++    /* Select a conversation without reloading the whole page */
++    const select = (c: ContactRow) => {
++        if (c.id === contact?.id) return;
++        router.visit(route('inbox.show', c.id), { only: ['selected'], preserveState: true, preserveScroll: true });
++    };
++
++    /* Search (server-side, debounced) */
++    useEffect(() => {
++        const id = window.setTimeout(async () => {
++            const list = await http<{ conversations: ContactRow[] }>(`${route('inbox.conversations')}?q=${encodeURIComponent(query)}`).catch(() => null);
++            if (list) setConversations(list.conversations);
++        }, 250);
++        return () => window.clearTimeout(id);
++    }, [query]);
++
++    /* Sending ------------------------------------------------------------- */
++    const send = async (body: SendBody, optimistic?: Partial<ChatMessage>) => {
++        if (!contact) return;
++        setSending(true);
++        setError(null);
++        const tempId = -Date.now();
++        if (optimistic) {
++            setMessages((prev) => [...prev, { id: tempId, wamid: null, direction: 'outbound', type: body.type, status: 'pending', preview: null, body: {}, context_wamid: replyTo?.wamid ?? null, template_id: null, error_code: null, error_message: null, sent_at: null, delivered_at: null, read_at: null, failed_at: null, timestamp: new Date().toISOString(), updated_at: null, pending: true, ...optimistic }]);
++            stickToBottom.current = true;
++        }
++        try {
++            const res = await http<{ message: ChatMessage; contact: ContactRow }>(route('inbox.send', contact.id), {
++                method: 'POST',
++                json: { ...body, phone_number_id: phoneId ?? undefined, reply_to: replyTo?.wamid ?? null },
++            });
++            setMessages((prev) => [...prev.filter((m) => m.id !== tempId), res.message].sort((a, b) => a.id - b.id));
++            setContact(res.contact);
++            setConversations((list) => {
++                const rest = list.filter((c) => c.id !== res.contact.id);
++                return [{ ...res.contact, unread_count: 0 }, ...rest];
++            });
++            setReplyTo(null);
++            setTemplateOpen(false);
++        } catch (e) {
++            const err = e as HttpError;
++            const data = (err.data ?? {}) as { message?: ChatMessage | null; contact?: ContactRow; error?: string; errors?: Record<string, string[]> };
++            const text = data.error ?? Object.values(data.errors ?? {}).flat()[0] ?? err.message;
++            setError(text);
++            if (data.message) {
++                setMessages((prev) => [...prev.filter((m) => m.id !== tempId), data.message as ChatMessage].sort((a, b) => a.id - b.id));
++            } else {
++                setMessages((prev) => prev.filter((m) => m.id !== tempId));
++            }
++            if (data.contact) setContact(data.contact);
++        } finally {
++            setSending(false);
++        }
++    };
++
++    const sendText = (text: string) => send({ type: 'text', text: { body: text } }, { type: 'text', preview: text, body: { text } });
++
++    const sendTemplate = (input: TemplateInput) => {
++        const t = templates.find((x) => String(x.id) === input.id);
++        return send({ type: 'template', template: input }, { type: 'template', preview: `Template ${t?.name ?? ''}`, body: { template: { name: t?.name ?? null, text: t?.components.find((c) => c.type === 'BODY')?.text ?? null } } });
++    };
++
++    const sendFile = async (file: File) => {
++        if (!contact || !phoneId) return;
++        const kind = file.type.startsWith('image/') ? 'image' : file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'document';
++        setSending(true);
++        setError(null);
++        try {
++            const fd = new FormData();
++            fd.append('phone_number_id', String(phoneId));
++            fd.append('media_type', kind);
++            fd.append('file', file);
++            const up = await http<{ media_id: string; file_name: string }>(route('media.store'), { method: 'POST', body: fd });
++            await send({ type: kind, media: { source: 'id', id: up.media_id, filename: kind === 'document' ? up.file_name : undefined } }, { type: kind, preview: `${kind}: ${file.name}`, body: { media: { type: kind, id: up.media_id, link: null, caption: null, filename: file.name, mime_type: file.type } } });
++        } catch (e) {
++            setError((e as Error).message);
++        } finally {
++            setSending(false);
++        }
++    };
++
++    const loadOlder = async () => {
++        if (!contact || messages.length === 0) return;
++        setLoadingOlder(true);
++        try {
++            const res = await http<{ messages: ChatMessage[]; has_more: boolean }>(`${route('inbox.messages', contact.id)}?before=${messages[0].id}`);
++            stickToBottom.current = false;
++            setMessages((prev) => [...res.messages, ...prev]);
++            setHasMore(res.has_more);
++        } finally {
++            setLoadingOlder(false);
++        }
++    };
++
++    /* Group messages by day */
++    const grouped = useMemo(() => {
++        const groups: { label: string; items: ChatMessage[] }[] = [];
++        for (const m of messages) {
++            const label = m.timestamp ? formatDayLabel(m.timestamp) : '';
++            const last = groups[groups.length - 1];
++            if (last && last.label === label) last.items.push(m);
++            else groups.push({ label, items: [m] });
++        }
++        return groups;
++    }, [messages]);
++
++    const accountTemplates = useMemo(() => {
++        const phone = phones.find((p) => p.id === phoneId);
++        return templates.filter((t) => !phone || t.account_id === phone.account_id);
++    }, [templates, phones, phoneId]);
++
++    const totalUnread = conversations.reduce((n, c) => n + c.unread_count, 0);
++
++    return (
++        <AppLayout breadcrumbs={breadcrumbs}>
++            <Head title={contact ? `${contact.display_name} · Inbox` : 'Inbox'} />
++            <div className="flex h-[calc(100dvh-4.5rem)] overflow-hidden rounded-xl border bg-white md:m-2">
++                {/* Left: conversations */}
++                <aside className={cn('w-full shrink-0 border-r md:w-80 lg:w-96', contact && 'hidden md:block')}>
++                    <div className="flex items-center justify-between border-b px-4 py-3">
++                        <h1 className="text-base font-semibold">
++                            Inbox {totalUnread > 0 && <span className="ml-1 rounded-full bg-brand px-2 py-0.5 text-xs font-bold text-[#14200a]">{totalUnread}</span>}
++                        </h1>
++                        <Link href={route('contacts.index')} className="text-xs text-brand-dark underline-offset-2 hover:underline">
++                            Manage contacts
++                        </Link>
++                    </div>
++                    <div className="h-[calc(100%-49px)]">
++                        <ConversationList conversations={conversations} selectedId={contact?.id ?? null} query={query} onQuery={setQuery} onSelect={select} />
++                    </div>
++                </aside>
++
++                {/* Right: chat */}
++                <section className={cn('flex min-w-0 flex-1 flex-col', !contact && 'hidden md:flex')}>
++                    {!contact ? (
++                        <div className="flex flex-1 flex-col items-center justify-center gap-3 bg-zinc-50 text-center">
++                            <div className="flex size-16 items-center justify-center rounded-full bg-brand-soft text-brand-dark">
++                                <MessageSquareText className="size-7" />
++                            </div>
++                            <p className="font-medium">Select a conversation</p>
++                            <p className="max-w-sm text-sm text-muted-foreground">Incoming and outgoing WhatsApp messages appear here in real time. Pick a contact on the left or create a new one.</p>
++                        </div>
++                    ) : (
++                        <>
++                            {/* Header */}
++                            <header className="flex items-center gap-3 border-b bg-white px-3 py-2.5">
++                                <button type="button" className="rounded-md p-1.5 hover:bg-muted md:hidden" onClick={() => router.visit(route('inbox.index'))}>
++                                    <ArrowLeft className="size-4" />
++                                </button>
++                                <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-brand text-sm font-semibold text-[#14200a]">{contact.initials}</div>
++                                <div className="min-w-0 flex-1">
++                                    <p className="truncate text-sm font-semibold">{contact.display_name}</p>
++                                    <p className="truncate text-xs text-muted-foreground">
++                                        {contact.phone}
++                                        {contact.company ? ` · ${contact.company}` : ''}
++                                    </p>
++                                </div>
++                                <WindowBadge window={contact.window} secondsLeft={secondsLeft} className="hidden sm:inline-flex" />
++                                {phones.length > 1 && (
++                                    <Select value={phoneId ? String(phoneId) : ''} onValueChange={(v) => setPhoneId(Number(v))}>
++                                        <SelectTrigger className="hidden h-8 w-44 text-xs lg:flex">
++                                            <SelectValue placeholder="Sender" />
++                                        </SelectTrigger>
++                                        <SelectContent>
++                                            {phones.map((p) => (
++                                                <SelectItem key={p.id} value={String(p.id)}>
++                                                    {p.display_phone_number}
++                                                </SelectItem>
++                                            ))}
++                                        </SelectContent>
++                                    </Select>
++                                )}
++                                <Button asChild variant="ghost" size="icon" title="Edit contact">
++                                    <Link href={route('contacts.edit', contact.id)}>
++                                        <Pencil />
++                                    </Link>
++                                </Button>
++                            </header>
++
++                            {/* Messages */}
++                            <div ref={scrollRef} onScroll={onScroll} className="flex-1 overflow-y-auto bg-[#efeae2] px-3 py-4 md:px-8" style={{ backgroundImage: 'radial-gradient(rgba(0,0,0,0.035) 1px, transparent 1px)', backgroundSize: '18px 18px' }}>
++                                {hasMore && (
++                                    <div className="mb-3 flex justify-center">
++                                        <Button variant="outline" size="sm" onClick={loadOlder} disabled={loadingOlder}>
++                                            {loadingOlder ? <Loader2 className="animate-spin" /> : <ChevronUp />} Load earlier messages
++                                        </Button>
++                                    </div>
++                                )}
++                                {messages.length === 0 && (
++                                    <div className="mx-auto max-w-sm rounded-lg bg-white/80 p-4 text-center text-sm text-muted-foreground">
++                                        No messages with {contact.display_name} yet. Start with an approved template — free-form messages unlock once the customer replies.
++                                    </div>
++                                )}
++                                {grouped.map((g) => (
++                                    <div key={g.label} className="space-y-1.5">
++                                        <div className="sticky top-0 z-10 my-3 flex justify-center">
++                                            <span className="rounded-md bg-white/90 px-2.5 py-1 text-[11px] font-medium text-zinc-600 shadow-sm">{g.label}</span>
++                                        </div>
++                                        {g.items.map((m) => (
++                                            <MessageBubble key={m.id} m={m} onReply={(x) => x.wamid && setReplyTo(x)} />
++                                        ))}
++                                    </div>
++                                ))}
++                            </div>
++
++                            {error && (
++                                <div className="flex items-center justify-between gap-3 border-t border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
++                                    <span>{error}</span>
++                                    <button type="button" className="text-xs underline" onClick={() => setError(null)}>
++                                        dismiss
++                                    </button>
++                                </div>
++                            )}
++
++                            <Composer window={contact.window} secondsLeft={secondsLeft} sending={sending} replyTo={replyTo} onCancelReply={() => setReplyTo(null)} onSendText={sendText} onSendFile={sendFile} onOpenTemplates={() => setTemplateOpen(true)} hasTemplates={accountTemplates.length > 0} />
++
++                            <TemplateDialog open={templateOpen} onOpenChange={setTemplateOpen} templates={accountTemplates} contactName={contact.display_name} sending={sending} error={templateOpen ? error : null} onSend={sendTemplate} />
++                        </>
++                    )}
++                </section>
++            </div>
++            {phones.length === 0 && (
++                <div className="mx-2 mb-2 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
++                    <RefreshCw className="size-4" /> No registered phone number yet — finish onboarding before sending messages.
++                </div>
++            )}
++        </AppLayout>
++    );
++}
+diff --git a/resources/js/pages/messages/create.tsx b/resources/js/pages/messages/create.tsx
+index 898db9a..5d81559 100644
+--- a/resources/js/pages/messages/create.tsx
++++ b/resources/js/pages/messages/create.tsx
+@@ -13,9 +13,9 @@ import { countVariables, fillVariables } from '@/lib/format';
+ import { cn } from '@/lib/utils';
+ import { type BreadcrumbItem } from '@/types';
+ import { type TemplateComponent } from '@/types/whatsapp';
+-import { Head, useForm } from '@inertiajs/react';
++import { Head, Link, useForm } from '@inertiajs/react';
+ import { FileText, Image as ImageIcon, LayoutTemplate, ListChecks, Loader2, MapPin, Mic, Send, Type, Upload, Video } from 'lucide-react';
+-import { FormEvent, useMemo, useState } from 'react';
++import { FormEvent, useEffect, useMemo, useState } from 'react';
+ 
+ interface Phone {
+     id: number;
+@@ -38,9 +38,17 @@ interface Template {
+     components: TemplateComponent[];
+ }
+ 
++interface ContactOption {
++    id: number;
++    wa_id: string;
++    name: string | null;
++    window: { open: boolean; seconds_left: number; has_history: boolean };
++}
++
+ interface Props {
+     phones: Phone[];
+     templates: Template[];
++    contacts: ContactOption[];
+     reply_to?: string | null;
+     to?: string | null;
+ }
+@@ -73,7 +81,7 @@ type FormData = {
+     interactive: { kind: 'button'; header: string; body: string; footer: string; buttons: { id: string; title: string }[] };
+ };
+ 
+-export default function MessageCreate({ phones, templates, reply_to, to }: Props) {
++export default function MessageCreate({ phones, templates, contacts, reply_to, to }: Props) {
+     const defaultPhone = phones.find((p) => p.is_default && p.is_registered) ?? phones.find((p) => p.is_registered) ?? phones[0];
+ 
+     const form = useForm<FormData>({
+@@ -90,6 +98,13 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
+ 
+     const { data, setData, errors, processing } = form;
+     const phone = phones.find((p) => String(p.id) === data.phone_number_id);
++    const selectedContact = contacts.find((c) => c.wa_id === data.to.replace(/\D/g, ''));
++    const windowClosed = !!selectedContact && !selectedContact.window.open;
++
++    useEffect(() => {
++        if (windowClosed && data.type !== 'template') setData('type', 'template');
++        // eslint-disable-next-line react-hooks/exhaustive-deps
++    }, [windowClosed]);
+     const accountTemplates = useMemo(() => templates.filter((t) => !phone || t.account_id === phone.account_id), [templates, phone]);
+     const template = accountTemplates.find((t) => String(t.id) === data.template.id);
+ 
+@@ -208,8 +223,35 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
+                                         </SelectContent>
+                                     </Select>
+                                 </Field>
+-                                <Field label="To (WhatsApp number)" error={errors.to} hint="International format, e.g. +971501234567" required>
+-                                    <Input value={data.to} onChange={(e) => setData('to', e.target.value)} placeholder="+9715XXXXXXXX" />
++                                <Field
++                                    label="To (contact)"
++                                    error={errors.to}
++                                    hint={
++                                        selectedContact
++                                            ? selectedContact.window.open
++                                                ? '24-hour window open — any message type allowed.'
++                                                : selectedContact.window.has_history
++                                                  ? '24-hour window has been closed — only a template can be sent.'
++                                                  : 'No conversation yet — the first message must be a template.'
++                                            : 'Only existing contacts can be messaged.'
++                                    }
++                                    required
++                                >
++                                    <Select value={selectedContact ? String(selectedContact.id) : ''} onValueChange={(v) => setData('to', '+' + (contacts.find((c) => String(c.id) === v)?.wa_id ?? ''))}>
++                                        <SelectTrigger>
++                                            <SelectValue placeholder={contacts.length ? 'Choose a contact' : 'No contacts yet'} />
++                                        </SelectTrigger>
++                                        <SelectContent>
++                                            {contacts.map((c) => (
++                                                <SelectItem key={c.id} value={String(c.id)}>
++                                                    {c.name ?? '+' + c.wa_id} · +{c.wa_id} {c.window.open ? '· window open' : ''}
++                                                </SelectItem>
++                                            ))}
++                                        </SelectContent>
++                                    </Select>
++                                    <Link href={route('contacts.create')} className="mt-1 inline-block text-xs text-brand-dark underline-offset-2 hover:underline">
++                                        + New contact
++                                    </Link>
+                                 </Field>
+                                 <Field label="Reply to message ID" error={errors.reply_to} hint="Optional wamid — adds a context object so WhatsApp shows the reply quote.">
+                                     <Input value={data.reply_to} onChange={(e) => setData('reply_to', e.target.value)} placeholder="wamid.HBg…" />
+@@ -227,9 +269,11 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
+                                         <button
+                                             type="button"
+                                             key={t.value}
++                                            disabled={windowClosed && t.value !== 'template'}
++                                            title={windowClosed && t.value !== 'template' ? 'Window closed — send a template first' : undefined}
+                                             onClick={() => setData('type', t.value)}
+                                             className={cn(
+-                                                'flex flex-col items-center gap-1 rounded-md border px-2 py-2.5 text-xs font-medium transition-colors',
++                                                'flex flex-col items-center gap-1 rounded-md border px-2 py-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                                                 data.type === t.value ? 'border-brand bg-brand-soft text-[#2b4a08]' : 'hover:bg-muted',
+                                             )}
+                                         >
+diff --git a/resources/js/types/whatsapp.ts b/resources/js/types/whatsapp.ts
+index d4316a5..3a50196 100644
+--- a/resources/js/types/whatsapp.ts
++++ b/resources/js/types/whatsapp.ts
+@@ -101,3 +101,78 @@ export interface MessageRow {
+     received_at: string | null;
+     created_at: string | null;
+ }
++
++/* Contacts & inbox --------------------------------------------------------- */
++
++export interface WindowState {
++    open: boolean;
++    expires_at: string | null;
++    opened_by: 'inbound' | 'template' | null;
++    seconds_left: number;
++    has_history: boolean;
++}
++
++export interface ContactRow {
++    id: number;
++    wa_id: string;
++    phone: string;
++    name: string | null;
++    display_name: string;
++    initials: string;
++    email: string | null;
++    company: string | null;
++    tags: string[];
++    source: string;
++    sender: string | null;
++    unread_count: number;
++    last_message_at: string | null;
++    last_message_preview: string | null;
++    last_message_direction: 'inbound' | 'outbound' | null;
++    window: WindowState;
++    created_at: string | null;
++}
++
++export interface ChatMessage {
++    id: number;
++    wamid: string | null;
++    direction: 'inbound' | 'outbound';
++    type: string;
++    status: string;
++    preview: string | null;
++    body: {
++        text?: string;
++        media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null };
++        location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
++        template?: { name: string | null; text: string | null };
++        interactive?: Record<string, unknown> | null;
++    };
++    context_wamid: string | null;
++    template_id: number | null;
++    error_code: number | null;
++    error_message: string | null;
++    sent_at: string | null;
++    delivered_at: string | null;
++    read_at: string | null;
++    failed_at: string | null;
++    timestamp: string | null;
++    updated_at: string | null;
++    /** client-only: optimistic bubble not yet confirmed by the server */
++    pending?: boolean;
++}
++
++export interface InboxPhone {
++    id: number;
++    account_id: number;
++    display_phone_number: string | null;
++    verified_name: string | null;
++    is_default: boolean;
++}
++
++export interface InboxTemplate {
++    id: number;
++    account_id: number;
++    name: string;
++    language: string;
++    category: string;
++    components: TemplateComponent[];
++}
+diff --git a/routes/web.php b/routes/web.php
+index 52b8a0a..b49b146 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -1,6 +1,8 @@
+ <?php
+ 
++use App\Http\Controllers\Contacts\ContactController;
+ use App\Http\Controllers\DashboardController;
++use App\Http\Controllers\Inbox\InboxController;
+ use App\Http\Controllers\Messaging\MediaController;
+ use App\Http\Controllers\Messaging\MessageController;
+ use App\Http\Controllers\Onboarding\EmbeddedSignupController;
+@@ -67,6 +69,26 @@
+         Route::post('{phone}/default', [PhoneNumberController::class, 'setDefault'])->name('default');
+     });
+ 
++    /* Contacts -------------------------------------------------------------- */
++    Route::prefix('contacts')->name('contacts.')->group(function () {
++        Route::get('/', [ContactController::class, 'index'])->name('index');
++        Route::get('create', [ContactController::class, 'create'])->name('create');
++        Route::post('/', [ContactController::class, 'store'])->name('store');
++        Route::get('{contact}/edit', [ContactController::class, 'edit'])->name('edit');
++        Route::put('{contact}', [ContactController::class, 'update'])->name('update');
++        Route::delete('{contact}', [ContactController::class, 'destroy'])->name('destroy');
++    });
++
++    /* Inbox (WhatsApp-style chat) ------------------------------------------- */
++    Route::prefix('inbox')->name('inbox.')->group(function () {
++        Route::get('/', [InboxController::class, 'index'])->name('index');
++        Route::get('conversations', [InboxController::class, 'conversations'])->name('conversations');
++        Route::get('{contact}', [InboxController::class, 'show'])->name('show');
++        Route::get('{contact}/messages', [InboxController::class, 'messages'])->name('messages');
++        Route::post('{contact}/messages', [InboxController::class, 'send'])->name('send');
++        Route::post('{contact}/read', [InboxController::class, 'markRead'])->name('read');
++    });
++
+     /* Messaging ------------------------------------------------------------ */
+     Route::prefix('messages')->name('messages.')->group(function () {
+         Route::get('/', [MessageController::class, 'index'])->name('index');
+diff --git a/tests/Feature/InboxTest.php b/tests/Feature/InboxTest.php
+new file mode 100644
+index 0000000..be07880
+--- /dev/null
++++ b/tests/Feature/InboxTest.php
+@@ -0,0 +1,167 @@
++<?php
++
++namespace Tests\Feature;
++
++use App\Jobs\ProcessWhatsAppWebhook;
++use App\Models\Contact;
++use App\Models\MessageTemplate;
++use App\Models\PhoneNumber;
++use App\Models\User;
++use App\Models\WebhookEvent;
++use App\Models\WhatsAppAccount;
++use App\Models\Workspace;
++use Illuminate\Foundation\Testing\RefreshDatabase;
++use Illuminate\Support\Facades\Http;
++use Tests\TestCase;
++
++class InboxTest extends TestCase
++{
++    use RefreshDatabase;
++
++    protected User $user;
++
++    protected PhoneNumber $phone;
++
++    protected WhatsAppAccount $account;
++
++    protected function setUp(): void
++    {
++        parent::setUp();
++
++        $workspace = Workspace::create(['name' => 'W', 'slug' => 'w']);
++        $this->user = User::factory()->create(['workspace_id' => $workspace->id]);
++        $this->account = WhatsAppAccount::create(['workspace_id' => $workspace->id, 'waba_id' => '111', 'access_token' => 'T', 'status' => 'active']);
++        $this->phone = PhoneNumber::create(['whatsapp_account_id' => $this->account->id, 'phone_number_id' => 'PN1', 'display_phone_number' => '+971 58 549 6310', 'is_registered' => true, 'is_default' => true]);
++
++        Http::fake(['graph.facebook.com/*/PN1/messages' => Http::response([
++            'messaging_product' => 'whatsapp',
++            'contacts' => [['input' => '+923121057349', 'wa_id' => '923121057349']],
++            'messages' => [['id' => 'wamid.'.uniqid()]],
++        ])]);
++    }
++
++    protected function contact(array $attrs = []): Contact
++    {
++        return Contact::create(['workspace_id' => $this->user->workspace_id, 'wa_id' => '923121057349', 'phone' => '+923121057349', 'name' => 'Ali'] + $attrs);
++    }
++
++    protected function template(): MessageTemplate
++    {
++        return MessageTemplate::create([
++            'whatsapp_account_id' => $this->account->id, 'template_id' => 't1', 'name' => 'hello', 'language' => 'en_US', 'category' => 'UTILITY', 'status' => 'APPROVED',
++            'components' => [['type' => 'BODY', 'text' => 'Hello {{1}}']],
++        ]);
++    }
++
++    public function test_composer_rejects_numbers_that_are_not_contacts(): void
++    {
++        $this->actingAs($this->user)->post(route('messages.store'), [
++            'phone_number_id' => $this->phone->id, 'to' => '+923121057349', 'type' => 'text', 'text' => ['body' => 'Hi'],
++        ])->assertSessionHasErrors('to');
++
++        Http::assertNothingSent();
++    }
++
++    public function test_free_form_message_is_blocked_when_no_window_is_open(): void
++    {
++        $contact = $this->contact();
++
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])
++            ->assertStatus(422)
++            ->assertJsonPath('errors.type.0', fn ($m) => str_contains($m, 'template'));
++
++        Http::assertNothingSent();
++    }
++
++    public function test_free_form_message_is_blocked_after_window_expires(): void
++    {
++        $contact = $this->contact(['window_expires_at' => now()->subMinute(), 'window_opened_by' => 'inbound', 'last_message_at' => now()->subDay()]);
++
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi']])
++            ->assertStatus(422)
++            ->assertJsonPath('errors.type.0', '24-hour window has been closed. Send an approved template to open the conversation.');
++    }
++
++    public function test_template_is_allowed_and_opens_the_window(): void
++    {
++        $contact = $this->contact();
++        $template = $this->template();
++
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'template', 'template' => ['id' => $template->id, 'body' => ['Ali']]])
++            ->assertOk()
++            ->assertJsonPath('message.status', 'accepted')
++            ->assertJsonPath('contact.window.open', true)
++            ->assertJsonPath('contact.window.opened_by', 'template');
++
++        $this->assertTrue($contact->fresh()->isWindowOpen());
++
++        // Free-form now allowed
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Thanks!']])
++            ->assertOk()
++            ->assertJsonPath('message.body.text', 'Thanks!');
++    }
++
++    public function test_inbound_message_creates_contact_opens_window_and_counts_unread(): void
++    {
++        $event = WebhookEvent::create(['object' => 'whatsapp_business_account', 'waba_id' => '111', 'field' => 'messages', 'payload' => ['change' => [
++            'field' => 'messages',
++            'value' => [
++                'messaging_product' => 'whatsapp',
++                'metadata' => ['display_phone_number' => '971585496310', 'phone_number_id' => 'PN1'],
++                'contacts' => [['profile' => ['name' => 'Ali Khan'], 'wa_id' => '923121057349']],
++                'messages' => [['from' => '923121057349', 'id' => 'wamid.in1', 'timestamp' => (string) now()->timestamp, 'text' => ['body' => 'Hello there'], 'type' => 'text']],
++            ],
++        ]]]);
++        (new ProcessWhatsAppWebhook($event->id))->handle();
++
++        $contact = Contact::where('wa_id', '923121057349')->firstOrFail();
++        $this->assertSame('Ali Khan', $contact->name);
++        $this->assertSame('inbound', $contact->source);
++        $this->assertSame(1, $contact->unread_count);
++        $this->assertTrue($contact->isWindowOpen());
++        $this->assertSame('inbound', $contact->window_opened_by);
++        $this->assertSame('Hello there', $contact->last_message_preview);
++
++        // Admin can now reply free-form from the inbox
++        $this->actingAs($this->user)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'Hi Ali']])->assertOk();
++
++        // Polling endpoint returns both messages
++        $this->actingAs($this->user)->getJson(route('inbox.messages', $contact))
++            ->assertOk()
++            ->assertJsonCount(2, 'messages')
++            ->assertJsonPath('messages.0.direction', 'inbound')
++            ->assertJsonPath('messages.1.direction', 'outbound');
++    }
++
++    public function test_contacts_crud(): void
++    {
++        $this->actingAs($this->user)->post(route('contacts.store'), ['name' => 'Sara', 'phone' => '+971 50 123 4567', 'tags' => ['lead', 'lead', ' vip '], 'email' => 'sara@example.com'])
++            ->assertRedirect();
++
++        $contact = Contact::where('wa_id', '971501234567')->firstOrFail();
++        $this->assertSame('+971501234567', $contact->phone);
++        $this->assertSame(['lead', 'vip'], $contact->tags);
++        $this->assertSame('manual', $contact->source);
++
++        // duplicate number rejected
++        $this->actingAs($this->user)->post(route('contacts.store'), ['name' => 'Dup', 'phone' => '971501234567'])->assertSessionHasErrors('wa_id');
++
++        $this->actingAs($this->user)->put(route('contacts.update', $contact), ['name' => 'Sara K', 'phone' => '+971501234567'])->assertRedirect(route('contacts.index'));
++        $this->assertSame('Sara K', $contact->fresh()->name);
++
++        $this->actingAs($this->user)->get(route('contacts.index'))->assertOk();
++        $this->actingAs($this->user)->get(route('inbox.show', $contact))->assertOk();
++
++        $this->actingAs($this->user)->delete(route('contacts.destroy', $contact))->assertRedirect(route('contacts.index'));
++        $this->assertDatabaseMissing('contacts', ['id' => $contact->id]);
++    }
++
++    public function test_other_workspaces_cannot_access_contact(): void
++    {
++        $contact = $this->contact();
++        $other = User::factory()->create(['workspace_id' => Workspace::create(['name' => 'X', 'slug' => 'x'])->id]);
++
++        $this->actingAs($other)->get(route('inbox.show', $contact))->assertForbidden();
++        $this->actingAs($other)->postJson(route('inbox.send', $contact), ['type' => 'text', 'text' => ['body' => 'x']])->assertForbidden();
++    }
++}
+diff --git a/tests/Feature/SendMessageTest.php b/tests/Feature/SendMessageTest.php
+index 3cda3d5..45898fb 100644
+--- a/tests/Feature/SendMessageTest.php
++++ b/tests/Feature/SendMessageTest.php
+@@ -2,6 +2,7 @@
+ 
+ namespace Tests\Feature;
+ 
++use App\Models\Contact;
+ use App\Models\PhoneNumber;
+ use App\Models\User;
+ use App\Models\WhatsAppAccount;
+@@ -26,6 +27,7 @@ public function test_text_message_sends_even_when_other_sections_are_submitted_e
+         $user = User::factory()->create(['workspace_id' => $workspace->id]);
+         $account = WhatsAppAccount::create(['workspace_id' => $workspace->id, 'waba_id' => '1', 'access_token' => 'T', 'status' => 'active']);
+         $phone = PhoneNumber::create(['whatsapp_account_id' => $account->id, 'phone_number_id' => 'PN1', 'display_phone_number' => '+971 58 549 6310', 'is_registered' => true]);
++        Contact::create(['workspace_id' => $workspace->id, 'wa_id' => '923121057349', 'name' => 'Test', 'window_expires_at' => now()->addHours(2), 'window_opened_by' => 'inbound', 'last_message_at' => now()]);
+ 
+         // Exactly what the composer submits for a text message
+         $response = $this->actingAs($user)->post(route('messages.store'), [
+-- 
+2.43.0
+

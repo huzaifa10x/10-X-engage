@@ -13,9 +13,9 @@ import { countVariables, fillVariables } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { type BreadcrumbItem } from '@/types';
 import { type TemplateComponent } from '@/types/whatsapp';
-import { Head, useForm } from '@inertiajs/react';
+import { Head, Link, useForm } from '@inertiajs/react';
 import { FileText, Image as ImageIcon, LayoutTemplate, ListChecks, Loader2, MapPin, Mic, Send, Type, Upload, Video } from 'lucide-react';
-import { FormEvent, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 interface Phone {
     id: number;
@@ -38,9 +38,17 @@ interface Template {
     components: TemplateComponent[];
 }
 
+interface ContactOption {
+    id: number;
+    wa_id: string;
+    name: string | null;
+    window: { open: boolean; seconds_left: number; has_history: boolean };
+}
+
 interface Props {
     phones: Phone[];
     templates: Template[];
+    contacts: ContactOption[];
     reply_to?: string | null;
     to?: string | null;
 }
@@ -73,7 +81,7 @@ type FormData = {
     interactive: { kind: 'button'; header: string; body: string; footer: string; buttons: { id: string; title: string }[] };
 };
 
-export default function MessageCreate({ phones, templates, reply_to, to }: Props) {
+export default function MessageCreate({ phones, templates, contacts, reply_to, to }: Props) {
     const defaultPhone = phones.find((p) => p.is_default && p.is_registered) ?? phones.find((p) => p.is_registered) ?? phones[0];
 
     const form = useForm<FormData>({
@@ -90,6 +98,13 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
 
     const { data, setData, errors, processing } = form;
     const phone = phones.find((p) => String(p.id) === data.phone_number_id);
+    const selectedContact = contacts.find((c) => c.wa_id === data.to.replace(/\D/g, ''));
+    const windowClosed = !!selectedContact && !selectedContact.window.open;
+
+    useEffect(() => {
+        if (windowClosed && data.type !== 'template') setData('type', 'template');
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [windowClosed]);
     const accountTemplates = useMemo(() => templates.filter((t) => !phone || t.account_id === phone.account_id), [templates, phone]);
     const template = accountTemplates.find((t) => String(t.id) === data.template.id);
 
@@ -208,8 +223,35 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
                                         </SelectContent>
                                     </Select>
                                 </Field>
-                                <Field label="To (WhatsApp number)" error={errors.to} hint="International format, e.g. +971501234567" required>
-                                    <Input value={data.to} onChange={(e) => setData('to', e.target.value)} placeholder="+9715XXXXXXXX" />
+                                <Field
+                                    label="To (contact)"
+                                    error={errors.to}
+                                    hint={
+                                        selectedContact
+                                            ? selectedContact.window.open
+                                                ? '24-hour window open — any message type allowed.'
+                                                : selectedContact.window.has_history
+                                                  ? '24-hour window has been closed — only a template can be sent.'
+                                                  : 'No conversation yet — the first message must be a template.'
+                                            : 'Only existing contacts can be messaged.'
+                                    }
+                                    required
+                                >
+                                    <Select value={selectedContact ? String(selectedContact.id) : ''} onValueChange={(v) => setData('to', '+' + (contacts.find((c) => String(c.id) === v)?.wa_id ?? ''))}>
+                                        <SelectTrigger>
+                                            <SelectValue placeholder={contacts.length ? 'Choose a contact' : 'No contacts yet'} />
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {contacts.map((c) => (
+                                                <SelectItem key={c.id} value={String(c.id)}>
+                                                    {c.name ?? '+' + c.wa_id} · +{c.wa_id} {c.window.open ? '· window open' : ''}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                    <Link href={route('contacts.create')} className="mt-1 inline-block text-xs text-brand-dark underline-offset-2 hover:underline">
+                                        + New contact
+                                    </Link>
                                 </Field>
                                 <Field label="Reply to message ID" error={errors.reply_to} hint="Optional wamid — adds a context object so WhatsApp shows the reply quote.">
                                     <Input value={data.reply_to} onChange={(e) => setData('reply_to', e.target.value)} placeholder="wamid.HBg…" />
@@ -227,9 +269,11 @@ export default function MessageCreate({ phones, templates, reply_to, to }: Props
                                         <button
                                             type="button"
                                             key={t.value}
+                                            disabled={windowClosed && t.value !== 'template'}
+                                            title={windowClosed && t.value !== 'template' ? 'Window closed — send a template first' : undefined}
                                             onClick={() => setData('type', t.value)}
                                             className={cn(
-                                                'flex flex-col items-center gap-1 rounded-md border px-2 py-2.5 text-xs font-medium transition-colors',
+                                                'flex flex-col items-center gap-1 rounded-md border px-2 py-2.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
                                                 data.type === t.value ? 'border-brand bg-brand-soft text-[#2b4a08]' : 'hover:bg-muted',
                                             )}
                                         >

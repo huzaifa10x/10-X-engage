@@ -4,6 +4,8 @@ namespace App\Providers;
 
 use App\Models\Message;
 use App\Models\WhatsAppAccount;
+use App\Models\Contact;
+use App\Policies\ContactPolicy;
 use App\Policies\MessagePolicy;
 use App\Policies\WhatsAppAccountPolicy;
 use App\Services\Meta\GraphClient;
@@ -24,5 +26,6 @@ class AppServiceProvider extends ServiceProvider
     {
         Gate::policy(WhatsAppAccount::class, WhatsAppAccountPolicy::class);
         Gate::policy(Message::class, MessagePolicy::class);
+        Gate::policy(Contact::class, ContactPolicy::class);
     }
 }

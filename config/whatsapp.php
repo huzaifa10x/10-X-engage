@@ -40,6 +40,17 @@ return [
         'auto_register' => (bool) env('WHATSAPP_AUTO_REGISTER', true),
     ],
 
+    'inbox' => [
+        'poll_interval_ms' => (int) env('WHATSAPP_INBOX_POLL_MS', 4000),
+    ],
+
+    'conversation' => [
+        // Product rule requested for Engage: a successfully sent template opens the 24-hour window for
+        // free-form replies. NOTE: Meta only guarantees free-form delivery inside a *customer-initiated*
+        // service window; if the customer never replies, free-form messages may still fail with 131047.
+        'template_opens_window' => (bool) env('WHATSAPP_TEMPLATE_OPENS_WINDOW', true),
+    ],
+
     'partner' => [
         // tech_provider | solution_partner
         'type' => env('WHATSAPP_PARTNER_TYPE', 'tech_provider'),

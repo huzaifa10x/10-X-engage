@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Contact;
 use App\Models\PhoneNumber;
 use App\Models\User;
 use App\Models\WhatsAppAccount;
@@ -26,6 +27,7 @@ class SendMessageTest extends TestCase
         $user = User::factory()->create(['workspace_id' => $workspace->id]);
         $account = WhatsAppAccount::create(['workspace_id' => $workspace->id, 'waba_id' => '1', 'access_token' => 'T', 'status' => 'active']);
         $phone = PhoneNumber::create(['whatsapp_account_id' => $account->id, 'phone_number_id' => 'PN1', 'display_phone_number' => '+971 58 549 6310', 'is_registered' => true]);
+        Contact::create(['workspace_id' => $workspace->id, 'wa_id' => '923121057349', 'name' => 'Test', 'window_expires_at' => now()->addHours(2), 'window_opened_by' => 'inbound', 'last_message_at' => now()]);
 
         // Exactly what the composer submits for a text message
         $response = $this->actingAs($user)->post(route('messages.store'), [
