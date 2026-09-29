@@ -86,6 +86,18 @@ class GraphClient
         return $this->handle($response, 'POST', $path);
     }
 
+    /** Download a file from a Meta CDN URL (media URLs from GET /{media-id}); needs the bearer token. */
+    public function downloadUrl(string $url): string
+    {
+        $response = $this->request()->withHeaders(['Accept' => '*/*'])->get($url);
+
+        if ($response->failed()) {
+            throw new GraphApiException('Media download failed (HTTP '.$response->status().')', httpStatus: $response->status());
+        }
+
+        return $response->body();
+    }
+
     protected function send(string $method, string $path, array $options): array
     {
         $request = $this->request();

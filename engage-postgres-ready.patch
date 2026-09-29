@@ -1,0 +1,96 @@
+From ab19fd0d75bd52fbab3112eb5ca8aad97ed253a8 Mon Sep 17 00:00:00 2001
+From: claude <claude@local>
+Date: Tue, 29 Sep 2026 12:40:35 +0000
+Subject: [PATCH] Analytics: driver-neutral SQL (MySQL/Postgres/SQLite)
+
+---
+ .../Analytics/AnalyticsController.php         | 27 ++++++++++++-------
+ resources/js/pages/analytics/index.tsx        |  4 +--
+ 2 files changed, 20 insertions(+), 11 deletions(-)
+
+diff --git a/app/Http/Controllers/Analytics/AnalyticsController.php b/app/Http/Controllers/Analytics/AnalyticsController.php
+index 1c210cd..535e931 100644
+--- a/app/Http/Controllers/Analytics/AnalyticsController.php
++++ b/app/Http/Controllers/Analytics/AnalyticsController.php
+@@ -22,18 +22,18 @@ public function index(Request $request): Response
+ 
+         $daily = (clone $base)
+             ->selectRaw("DATE(created_at) as day,
+-                SUM(direction = 'outbound') as sent,
+-                SUM(direction = 'outbound' AND status IN ('delivered','read')) as delivered,
+-                SUM(direction = 'outbound' AND status = 'read') as `read`,
+-                SUM(direction = 'outbound' AND status = 'failed') as failed,
+-                SUM(direction = 'inbound') as received")
++                SUM(CASE WHEN direction = 'outbound' THEN 1 ELSE 0 END) as sent,
++                SUM(CASE WHEN direction = 'outbound' AND status IN ('delivered','read') THEN 1 ELSE 0 END) as delivered,
++                SUM(CASE WHEN direction = 'outbound' AND status = 'read' THEN 1 ELSE 0 END) as read_count,
++                SUM(CASE WHEN direction = 'outbound' AND status = 'failed' THEN 1 ELSE 0 END) as failed,
++                SUM(CASE WHEN direction = 'inbound' THEN 1 ELSE 0 END) as received")
+             ->groupBy('day')->orderBy('day')->get()->keyBy('day');
+ 
+         $series = [];
+         for ($d = $from->copy(); $d <= now(); $d->addDay()) {
+             $key = $d->toDateString();
+             $row = $daily[$key] ?? null;
+-            $series[] = ['day' => $key, 'sent' => (int) ($row->sent ?? 0), 'delivered' => (int) ($row->delivered ?? 0), 'read' => (int) ($row->read ?? 0), 'failed' => (int) ($row->failed ?? 0), 'received' => (int) ($row->received ?? 0)];
++            $series[] = ['day' => $key, 'sent' => (int) ($row->sent ?? 0), 'delivered' => (int) ($row->delivered ?? 0), 'read' => (int) ($row->read_count ?? 0), 'failed' => (int) ($row->failed ?? 0), 'received' => (int) ($row->received ?? 0)];
+         }
+ 
+         $totals = ['sent' => 0, 'delivered' => 0, 'read' => 0, 'failed' => 0, 'received' => 0];
+@@ -46,19 +46,28 @@ public function index(Request $request): Response
+         $perNumber = (clone $base)->where('direction', 'outbound')
+             ->join('phone_numbers', 'phone_numbers.id', '=', 'messages.phone_number_id')
+             ->selectRaw("phone_numbers.display_phone_number as number, COUNT(*) as sent,
+-                SUM(messages.status IN ('delivered','read')) as delivered, SUM(messages.status = 'read') as `read`, SUM(messages.status = 'failed') as failed")
++                SUM(CASE WHEN messages.status IN ('delivered','read') THEN 1 ELSE 0 END) as delivered,
++                SUM(CASE WHEN messages.status = 'read' THEN 1 ELSE 0 END) as read_count,
++                SUM(CASE WHEN messages.status = 'failed' THEN 1 ELSE 0 END) as failed")
+             ->groupBy('phone_numbers.display_phone_number')->orderByDesc('sent')->get();
+ 
+         $topTemplates = (clone $base)->where('direction', 'outbound')->whereNotNull('message_template_id')
+             ->join('message_templates', 'message_templates.id', '=', 'messages.message_template_id')
+-            ->selectRaw("message_templates.name, COUNT(*) as sent, SUM(messages.status IN ('delivered','read')) as delivered, SUM(messages.status = 'read') as `read`, SUM(messages.status = 'failed') as failed")
++            ->selectRaw("message_templates.name, COUNT(*) as sent,
++                SUM(CASE WHEN messages.status IN ('delivered','read') THEN 1 ELSE 0 END) as delivered,
++                SUM(CASE WHEN messages.status = 'read' THEN 1 ELSE 0 END) as read_count,
++                SUM(CASE WHEN messages.status = 'failed' THEN 1 ELSE 0 END) as failed")
+             ->groupBy('message_templates.name')->orderByDesc('sent')->limit(10)->get();
+ 
+         $topErrors = (clone $base)->where('direction', 'outbound')->where('status', 'failed')
+             ->selectRaw('error_code, MAX(error_message) as message, COUNT(*) as n')->groupBy('error_code')->orderByDesc('n')->limit(8)->get();
+ 
+         $contacts = DB::table('contacts')->where('workspace_id', $workspaceId)
+-            ->selectRaw("COUNT(*) as total, SUM(opt_in_status = 'opted_in') as opted_in, SUM(opt_in_status = 'opted_out') as opted_out, SUM(window_expires_at > ?) as open_windows, SUM(created_at >= ?) as new_contacts", [now(), $from])
++            ->selectRaw("COUNT(*) as total,
++                SUM(CASE WHEN opt_in_status = 'opted_in' THEN 1 ELSE 0 END) as opted_in,
++                SUM(CASE WHEN opt_in_status = 'opted_out' THEN 1 ELSE 0 END) as opted_out,
++                SUM(CASE WHEN window_expires_at > ? THEN 1 ELSE 0 END) as open_windows,
++                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as new_contacts", [now(), $from])
+             ->first();
+ 
+         return Inertia::render('analytics/index', [
+diff --git a/resources/js/pages/analytics/index.tsx b/resources/js/pages/analytics/index.tsx
+index 9d1004c..50b5c25 100644
+--- a/resources/js/pages/analytics/index.tsx
++++ b/resources/js/pages/analytics/index.tsx
+@@ -10,7 +10,7 @@ import { useMemo } from 'react';
+ const breadcrumbs: BreadcrumbItem[] = [{ title: 'Analytics', href: '/analytics' }];
+ 
+ interface Day { day: string; sent: number; delivered: number; read: number; failed: number; received: number }
+-interface Row { number?: string; name?: string; sent: number; delivered: number; read: number; failed: number }
++interface Row { number?: string; name?: string; sent: number; delivered: number; read_count: number; failed: number }
+ 
+ interface Props {
+     range: number;
+@@ -171,7 +171,7 @@ function Table({ title, rows, label }: { title: string; rows: Row[]; label: 'num
+                                 <td className="py-1.5 pr-2 font-medium">{r[label]}</td>
+                                 <td className="py-1.5 pr-2 text-right">{r.sent}</td>
+                                 <td className="py-1.5 pr-2 text-right">{r.delivered} <span className="text-xs text-muted-foreground">{r.sent ? Math.round((Number(r.delivered) / Number(r.sent)) * 100) : 0}%</span></td>
+-                                <td className="py-1.5 pr-2 text-right">{r.read}</td>
++                                <td className="py-1.5 pr-2 text-right">{r.read_count}</td>
+                                 <td className="py-1.5 text-right text-red-600">{Number(r.failed) || ''}</td>
+                             </tr>
+                         ))}
+-- 
+2.43.0
+

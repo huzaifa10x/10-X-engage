@@ -8,6 +8,7 @@ use App\Http\Controllers\Contacts\ContactController;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\InboxSendRequest;
 use App\Models\Contact;
+use App\Models\MediaAsset;
 use App\Models\Message;
 use App\Models\MessageTemplate;
 use App\Models\PhoneNumber;
@@ -104,10 +105,10 @@ class InboxController extends Controller
         $since = $request->query('since') ? Carbon::parse($request->query('since')) : null;
         $before = (int) $request->query('before', 0);
 
-        $query = $contact->messages()->orderBy('id');
+        $query = $contact->messages()->with('mediaAsset')->orderBy('id');
 
         if ($before > 0) {
-            $older = $contact->messages()->where('id', '<', $before)->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
+            $older = $contact->messages()->with('mediaAsset')->where('id', '<', $before)->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
 
             return response()->json(['messages' => $older->map(fn ($m) => self::messageRow($m)), 'has_more' => $older->count() === self::PAGE_SIZE]);
         }
@@ -121,7 +122,7 @@ class InboxController extends Controller
             });
             $messages = $query->get();
         } else {
-            $messages = $contact->messages()->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
+            $messages = $contact->messages()->with('mediaAsset')->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
         }
 
         return response()->json([
@@ -179,21 +180,26 @@ class InboxController extends Controller
             throw ValidationException::withMessages(['type' => $e->getMessage()]);
         }
 
+        $extra = [];
+        if (in_array($data['type'], ['image', 'video', 'document', 'audio'], true) && ($data['media']['id'] ?? null)) {
+            $extra['media_asset_id'] = MediaAsset::where('workspace_id', $contact->workspace_id)->where('meta_media_id', $data['media']['id'])->value('id');
+        }
+
         try {
-            $message = $send($request->user(), $phone, $payload, $preview, $template, $contact);
+            $message = $send($request->user(), $phone, $payload, $preview, $template, $contact, 'agent', $extra);
         } catch (GraphApiException $e) {
             // The failed message row exists; return it so the bubble shows the error.
             $failed = $contact->messages()->latest('id')->first();
 
             return response()->json([
-                'message' => $failed ? self::messageRow($failed) : null,
+                'message' => $failed ? self::messageRow($failed->load('mediaAsset')) : null,
                 'contact' => ContactController::row($contact->fresh()),
                 'error' => $e->displayMessage(),
             ], 422);
         }
 
         return response()->json([
-            'message' => self::messageRow($message),
+            'message' => self::messageRow($message->load('mediaAsset')),
             'contact' => ContactController::row($contact->fresh()),
         ]);
     }
@@ -215,7 +221,7 @@ class InboxController extends Controller
 
     protected function conversationPayload(Contact $contact): array
     {
-        $messages = $contact->messages()->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
+        $messages = $contact->messages()->with('mediaAsset')->orderByDesc('id')->limit(self::PAGE_SIZE)->get()->reverse()->values();
 
         return [
             'contact' => ContactController::row($contact->loadMissing('phoneNumber')),
@@ -236,6 +242,7 @@ class InboxController extends Controller
             'body' => self::body($m),
             'context_wamid' => $m->context_wamid,
             'template_id' => $m->message_template_id,
+            'origin' => $m->origin,
             'error_code' => $m->error_code,
             'error_message' => $m->error_message,
             'sent_at' => $m->sent_at?->toIso8601String(),
@@ -260,8 +267,10 @@ class InboxController extends Controller
                     'id' => $p[$m->type]['id'] ?? null,
                     'link' => $p[$m->type]['link'] ?? null,
                     'caption' => $p[$m->type]['caption'] ?? null,
-                    'filename' => $p[$m->type]['filename'] ?? null,
-                    'mime_type' => $p[$m->type]['mime_type'] ?? null,
+                    'filename' => $p[$m->type]['filename'] ?? $m->mediaAsset?->file_name,
+                    'mime_type' => $p[$m->type]['mime_type'] ?? $m->mediaAsset?->mime_type,
+                    'url' => $m->mediaAsset?->url() ?? ($p[$m->type]['link'] ?? null),
+                    'pending' => $m->mediaAsset && ! $m->mediaAsset->isStored() && ! $m->mediaAsset->download_error,
                 ],
             ],
             'location' => ['location' => $p['location'] ?? null],

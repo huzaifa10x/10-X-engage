@@ -10,18 +10,33 @@ import { Textarea } from '@/components/ui/textarea';
 import AppLayout from '@/layouts/app-layout';
 import { type BreadcrumbItem } from '@/types';
 import { type ContactRow } from '@/types/whatsapp';
-import { Head, Link, useForm } from '@inertiajs/react';
+import { Head, Link, router, useForm } from '@inertiajs/react';
+import OptInBadge from '@/components/opt-in-badge';
+import { Checkbox } from '@/components/ui/checkbox';
+import { formatDate } from '@/lib/format';
 import { Loader2, MessageSquareText, Save, X } from 'lucide-react';
 import { FormEvent, useState } from 'react';
 
+interface ConsentEvent {
+    id: number;
+    action: 'opt_in' | 'opt_out';
+    source: string;
+    scope: string[];
+    keyword: string | null;
+    consent_text: string | null;
+    user: string | null;
+    created_at: string | null;
+}
+
 interface Props {
-    contact: (ContactRow & { notes: string | null; phone_number_id: number | null }) | null;
+    contact: (ContactRow & { notes: string | null; phone_number_id: number | null; is_suppressed?: boolean }) | null;
     phones: { id: number; label: string }[];
+    consent_events?: ConsentEvent[];
 }
 
 type FormData = { name: string; phone: string; email: string; company: string; tags: string[]; notes: string; phone_number_id: string };
 
-export default function ContactForm({ contact, phones }: Props) {
+export default function ContactForm({ contact, phones, consent_events = [] }: Props) {
     const editing = !!contact;
     const breadcrumbs: BreadcrumbItem[] = [
         { title: 'Contacts', href: '/contacts' },
@@ -144,6 +159,7 @@ export default function ContactForm({ contact, phones }: Props) {
                     </Card>
 
                     <div className="space-y-4">
+                        {editing && <ConsentCard contact={contact} events={consent_events} />}
                         <Card>
                             <CardContent className="space-y-3 p-4 text-sm text-muted-foreground">
                                 <p className="font-medium text-foreground">How messaging works</p>
@@ -163,5 +179,69 @@ export default function ContactForm({ contact, phones }: Props) {
                 </form>
             </div>
         </AppLayout>
+    );
+}
+
+function ConsentCard({ contact, events }: { contact: NonNullable<Props['contact']>; events: ConsentEvent[] }) {
+    const [status, setStatus] = useState<'opted_in' | 'opted_out' | 'unknown'>(contact.opt_in_status);
+    const [scope, setScope] = useState<string[]>(contact.opt_in_scope.length ? contact.opt_in_scope : ['marketing', 'transactional']);
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const dirty = status !== contact.opt_in_status || (status === 'opted_in' && scope.join() !== contact.opt_in_scope.join());
+
+    const save = () =>
+        router.put(route('contacts.consent', contact.id), { status, scope, consent_text: text }, { preserveScroll: true, onStart: () => setBusy(true), onFinish: () => setBusy(false) });
+
+    return (
+        <Card>
+            <CardHeader>
+                <CardTitle className="flex items-center justify-between text-base">
+                    Consent <OptInBadge status={contact.opt_in_status} />
+                </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+                <Select value={status} onValueChange={(v) => setStatus(v as typeof status)}>
+                    <SelectTrigger>
+                        <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                        <SelectItem value="opted_in">Opted in</SelectItem>
+                        <SelectItem value="opted_out">Opted out (blocks broadcasts & templates)</SelectItem>
+                        <SelectItem value="unknown">Unknown / not asked</SelectItem>
+                    </SelectContent>
+                </Select>
+                {status === 'opted_in' && (
+                    <div className="flex gap-4">
+                        {['marketing', 'transactional'].map((s) => (
+                            <label key={s} className="flex items-center gap-2 capitalize">
+                                <Checkbox checked={scope.includes(s)} onCheckedChange={(v) => setScope(v ? [...scope, s] : scope.filter((x) => x !== s))} /> {s}
+                            </label>
+                        ))}
+                    </div>
+                )}
+                {status === 'opted_in' && dirty && <Textarea rows={2} placeholder="Proof of consent (where / when they agreed)" value={text} onChange={(e) => setText(e.target.value)} />}
+                {dirty && (
+                    <Button size="sm" onClick={save} disabled={busy}>
+                        {busy ? <Loader2 className="animate-spin" /> : null} Save consent
+                    </Button>
+                )}
+                {contact.is_suppressed && <p className="text-xs text-red-600">On the suppression list — no business-initiated messages will be sent.</p>}
+                {events.length > 0 && (
+                    <div className="border-t pt-2">
+                        <p className="mb-1 text-xs font-medium text-muted-foreground uppercase">Ledger</p>
+                        <ul className="space-y-1 text-xs text-muted-foreground">
+                            {events.map((e) => (
+                                <li key={e.id}>
+                                    <span className={e.action === 'opt_in' ? 'text-[#2b4a08]' : 'text-red-600'}>{e.action === 'opt_in' ? 'Opt-in' : 'Opt-out'}</span> via {e.source}
+                                    {e.keyword ? ` (“${e.keyword}”)` : ''}
+                                    {e.user ? ` by ${e.user}` : ''} · {formatDate(e.created_at)}
+                                    {e.consent_text ? <span className="block italic">{e.consent_text}</span> : null}
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
+            </CardContent>
+        </Card>
     );
 }

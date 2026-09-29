@@ -44,6 +44,20 @@ return [
         'poll_interval_ms' => (int) env('WHATSAPP_INBOX_POLL_MS', 1500),
     ],
 
+    'consent' => [
+        // Whole-message keyword match (normalized: lowercase, trimmed, punctuation stripped)
+        'opt_out_keywords' => ['stop', 'unsubscribe', 'cancel', 'end', 'quit', 'توقف', 'الغاء'],
+        'opt_in_keywords' => ['start', 'join', 'subscribe', 'yes', 'unstop', 'اشتراك'],
+        'opt_out_reply' => "You have been unsubscribed and won't receive further messages. Reply START to subscribe again.",
+        'opt_in_reply' => "You're subscribed. Reply STOP at any time to unsubscribe.",
+        'broadcast_requires_opt_in' => false,
+    ],
+
+    'broadcast' => [
+        'rate_per_second' => (int) env('WHATSAPP_BROADCAST_RATE', 20),   // Cloud API default is 80 mps per number
+        'chunk' => 200,
+    ],
+
     'conversation' => [
         // Product rule requested for Engage: a successfully sent template opens the 24-hour window for
         // free-form replies. NOTE: Meta only guarantees free-form delivery inside a *customer-initiated*
@@ -78,6 +92,8 @@ return [
     ],
 
     'media' => [
+        'disk' => env('WHATSAPP_MEDIA_DISK', 'local'),   // private disk; files are streamed through /media/{id}
+        'download_inbound' => (bool) env('WHATSAPP_MEDIA_DOWNLOAD', true),
         // Cloud API media upload limits (bytes) – from the Cloud API collection "Media" folder.
         'limits' => [
             'image' => 5 * 1024 * 1024,

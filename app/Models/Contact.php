@@ -20,7 +20,14 @@ class Contact extends Model
         'workspace_id', 'wa_id', 'phone', 'name', 'email', 'company', 'tags', 'notes', 'source',
         'phone_number_id', 'created_by', 'last_inbound_at', 'last_outbound_at', 'last_message_at',
         'last_message_preview', 'last_message_direction', 'unread_count', 'window_expires_at', 'window_opened_by', 'meta',
+        'opt_in_status', 'opt_in_scope', 'opted_at', 'last_activity_at', 'custom_fields',
     ];
+
+    public const OPT_UNKNOWN = 'unknown';
+
+    public const OPT_IN = 'opted_in';
+
+    public const OPT_OUT = 'opted_out';
 
     protected function casts(): array
     {
@@ -32,6 +39,10 @@ class Contact extends Model
             'last_message_at' => 'datetime',
             'window_expires_at' => 'datetime',
             'unread_count' => 'integer',
+            'opt_in_scope' => 'array',
+            'opted_at' => 'datetime',
+            'last_activity_at' => 'datetime',
+            'custom_fields' => 'array',
         ];
     }
 
@@ -53,6 +64,56 @@ class Contact extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function consentEvents(): HasMany
+    {
+        return $this->hasMany(ConsentEvent::class)->latest('id');
+    }
+
+    /* Consent ------------------------------------------------------------ */
+
+    public function isSuppressed(): bool
+    {
+        return Suppression::where('workspace_id', $this->workspace_id)->where('wa_id', $this->wa_id)->exists();
+    }
+
+    public function isOptedOut(): bool
+    {
+        return $this->opt_in_status === self::OPT_OUT;
+    }
+
+    /** May this contact receive a business-initiated (template / broadcast) message? */
+    public function canReceiveBusinessInitiated(bool $requireOptIn = false, ?string $scope = null): bool
+    {
+        if ($this->isOptedOut() || $this->isSuppressed()) {
+            return false;
+        }
+        if ($requireOptIn && $this->opt_in_status !== self::OPT_IN) {
+            return false;
+        }
+        if ($scope && $this->opt_in_status === self::OPT_IN && ! empty($this->opt_in_scope) && ! in_array($scope, $this->opt_in_scope, true)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    public function firstName(): string
+    {
+        return trim(explode(' ', trim((string) $this->name))[0] ?? '');
+    }
+
+    /** Values available as {{contact.*}} tokens in broadcast variables. */
+    public function tokenValues(): array
+    {
+        return array_merge([
+            'name' => $this->name ?? '',
+            'first_name' => $this->firstName(),
+            'phone' => $this->phone ?? '+'.$this->wa_id,
+            'email' => $this->email ?? '',
+            'company' => $this->company ?? '',
+        ], collect($this->custom_fields ?? [])->filter(fn ($v) => is_scalar($v))->all());
     }
 
     /* Conversation window ----------------------------------------------- */

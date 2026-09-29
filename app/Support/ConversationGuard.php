@@ -31,9 +31,16 @@ class ConversationGuard
         return $contact;
     }
 
+    public const OPTED_OUT_MESSAGE = 'This contact has opted out (STOP) and cannot receive business-initiated messages. They can reply START to re-subscribe.';
+
     public static function assertCanSend(Contact $contact, string $type, string $field = 'type'): void
     {
         if ($type === 'template') {
+            // Business-initiated: honour opt-out / suppression.
+            if (! $contact->canReceiveBusinessInitiated()) {
+                throw ValidationException::withMessages([$field => self::OPTED_OUT_MESSAGE]);
+            }
+
             return;
         }
 

@@ -27,6 +27,9 @@ class ContactController extends Controller
         if ($tag = $request->query('tag')) {
             $query->whereJsonContains('tags', $tag);
         }
+        if ($opt = $request->query('opt_in')) {
+            $query->where('opt_in_status', $opt);
+        }
 
         $contacts = $query->orderByDesc('last_message_at')->orderBy('name')->paginate(25)->withQueryString()
             ->through(fn (Contact $c) => self::row($c));
@@ -35,12 +38,14 @@ class ContactController extends Controller
 
         return Inertia::render('contacts/index', [
             'contacts' => $contacts,
-            'filters' => $request->only('q', 'window', 'tag'),
+            'filters' => $request->only('q', 'window', 'tag', 'opt_in'),
             'tags' => $tags,
             'stats' => [
                 'total' => $workspace->contacts()->count(),
                 'open_windows' => $workspace->contacts()->where('window_expires_at', '>', now())->count(),
                 'unread' => (int) $workspace->contacts()->sum('unread_count'),
+                'opted_in' => $workspace->contacts()->where('opt_in_status', 'opted_in')->count(),
+                'opted_out' => $workspace->contacts()->where('opt_in_status', 'opted_out')->count(),
             ],
         ]);
     }
@@ -68,8 +73,12 @@ class ContactController extends Controller
         Gate::authorize('update', $contact);
 
         return Inertia::render('contacts/form', [
-            'contact' => self::row($contact) + ['email' => $contact->email, 'company' => $contact->company, 'notes' => $contact->notes, 'phone_number_id' => $contact->phone_number_id],
+            'contact' => self::row($contact) + ['email' => $contact->email, 'company' => $contact->company, 'notes' => $contact->notes, 'phone_number_id' => $contact->phone_number_id, 'is_suppressed' => $contact->isSuppressed()],
             'phones' => $this->phones($request),
+            'consent_events' => $contact->consentEvents()->with('user:id,name')->limit(20)->get()->map(fn ($e) => [
+                'id' => $e->id, 'action' => $e->action, 'source' => $e->source, 'scope' => $e->scope ?? [], 'keyword' => $e->keyword,
+                'consent_text' => $e->consent_text, 'user' => $e->user?->name, 'created_at' => $e->created_at?->toIso8601String(),
+            ]),
         ]);
     }
 
@@ -118,6 +127,10 @@ class ContactController extends Controller
             'last_message_preview' => $c->last_message_preview,
             'last_message_direction' => $c->last_message_direction,
             'window' => $c->windowState(),
+            'opt_in_status' => $c->opt_in_status ?? 'unknown',
+            'opt_in_scope' => $c->opt_in_scope ?? [],
+            'opted_at' => $c->opted_at?->toIso8601String(),
+            'last_activity_at' => $c->last_activity_at?->toIso8601String(),
             'created_at' => $c->created_at?->toIso8601String(),
         ];
     }

@@ -3,7 +3,13 @@
 namespace App\Jobs;
 
 use App\Actions\Templates\SyncTemplates;
+use App\Actions\Messaging\SendMessage;
+use App\Jobs\DownloadInboundMedia;
+use App\Models\BroadcastRecipient;
 use App\Models\Contact;
+use App\Models\MediaAsset;
+use App\Services\ConsentService;
+use App\Support\MessagePayloadBuilder;
 use App\Models\Message;
 use App\Models\MessageTemplate;
 use App\Models\PhoneNumber;
@@ -125,8 +131,71 @@ class ProcessWhatsAppWebhook implements ShouldQueue
                 // A customer message (re)opens the 24-hour customer-service window.
                 $contact->openWindow(Contact::OPENED_BY_INBOUND, $receivedAt);
                 $contact->increment('unread_count');
+                $contact->forceFill(['last_activity_at' => $receivedAt])->save();
                 $contact->touchConversation($message);
+
+                $this->captureInboundMedia($message, $phone, $incoming);
+                $this->interceptKeywords($phone, $contact, $message, $incoming);
             }
+        }
+    }
+
+    /** Record the media ID and copy the file into our storage (Meta's copy expires). */
+    protected function captureInboundMedia(Message $message, PhoneNumber $phone, array $incoming): void
+    {
+        $type = $incoming['type'] ?? '';
+        if (! in_array($type, ['image', 'video', 'audio', 'document', 'sticker'], true) || empty($incoming[$type]['id'])) {
+            return;
+        }
+
+        $asset = MediaAsset::create([
+            'workspace_id' => $message->workspace_id,
+            'phone_number_id' => $phone->id,
+            'message_id' => $message->id,
+            'kind' => MediaAsset::KIND_MEDIA_ID,
+            'direction' => 'inbound',
+            'media_type' => $type,
+            'meta_media_id' => $incoming[$type]['id'],
+            'file_name' => $incoming[$type]['filename'] ?? null,
+            'mime_type' => $incoming[$type]['mime_type'] ?? null,
+            'sha256' => $incoming[$type]['sha256'] ?? null,
+        ]);
+        $message->forceFill(['media_asset_id' => $asset->id])->save();
+
+        if (config('whatsapp.media.download_inbound', true)) {
+            DownloadInboundMedia::dispatch($asset->id);
+        }
+    }
+
+    /** STOP / START keywords are honoured before the message is routed anywhere else. */
+    protected function interceptKeywords(PhoneNumber $phone, Contact $contact, Message $message, array $incoming): void
+    {
+        $text = match ($incoming['type'] ?? '') {
+            'text' => $incoming['text']['body'] ?? null,
+            'button' => $incoming['button']['text'] ?? null,
+            'interactive' => $incoming['interactive']['button_reply']['title'] ?? $incoming['interactive']['list_reply']['title'] ?? null,
+            default => null,
+        };
+        if ($text === null) {
+            return;
+        }
+
+        $workspace = $phone->account->workspace;
+        $result = app(ConsentService::class)->interceptKeyword($workspace, $contact, $text);
+        if (! $result) {
+            return;
+        }
+
+        $reply = $workspace->setting($result === 'opt_out' ? 'opt_out_reply' : 'opt_in_reply');
+        if (! $reply) {
+            return;
+        }
+
+        try {
+            $payload = (new MessagePayloadBuilder('+'.$contact->wa_id))->text($reply);
+            app(SendMessage::class)(null, $phone, $payload, $reply, null, $contact, origin: 'system');
+        } catch (\Throwable $e) {
+            Log::warning('Keyword auto-reply failed', ['contact' => $contact->id, 'error' => $e->getMessage()]);
         }
     }
 

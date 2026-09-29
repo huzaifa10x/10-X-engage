@@ -1,4 +1,3 @@
-import AppLogoIcon from './app-logo-icon';
 import logo from '../../../public/favicon.ico'
 
 export default function AppLogo() {

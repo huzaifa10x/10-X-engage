@@ -4,14 +4,16 @@ import { NavUser } from '@/components/nav-user';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { type NavItem } from '@/types';
 import { Link } from '@inertiajs/react';
-import { BookOpen, Building2, Inbox, LayoutGrid, LayoutTemplate, MessageSquareText, PlugZap, Users } from 'lucide-react';
+import { BarChart3, BookOpen, Building2, Inbox, LayoutGrid, LayoutTemplate, Megaphone, MessageSquareText, PlugZap, Users } from 'lucide-react';
 import AppLogo from './app-logo';
 
 const mainNavItems: NavItem[] = [
     { title: 'Dashboard', url: '/dashboard', icon: LayoutGrid },
     { title: 'Inbox', url: '/inbox', icon: Inbox },
     { title: 'Contacts', url: '/contacts', icon: Users },
+    { title: 'Broadcasts', url: '/broadcasts', icon: Megaphone },
     { title: 'Templates', url: '/templates', icon: LayoutTemplate },
+    { title: 'Analytics', url: '/analytics', icon: BarChart3 },
     { title: 'Message log', url: '/messages', icon: MessageSquareText },
     { title: 'Accounts', url: '/accounts', icon: Building2 },
     { title: 'Onboarding', url: '/onboarding', icon: PlugZap },

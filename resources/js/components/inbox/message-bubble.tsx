@@ -2,7 +2,7 @@ import StatusTicks from '@/components/inbox/status-ticks';
 import { formatTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { type ChatMessage } from '@/types/whatsapp';
-import { Ban, FileText, Image as ImageIcon, LayoutTemplate, MapPin, Mic, Video } from 'lucide-react';
+import { Ban, Download, FileText, Image as ImageIcon, LayoutTemplate, Loader2, MapPin, Megaphone, Mic, Video } from 'lucide-react';
 
 const mediaIcon: Record<string, typeof ImageIcon> = { image: ImageIcon, video: Video, document: FileText, audio: Mic, sticker: ImageIcon };
 
@@ -11,15 +11,27 @@ function Content({ m }: { m: ChatMessage }) {
 
     if (b.media) {
         const Icon = mediaIcon[b.media.type] ?? FileText;
+        const url = b.media.url ?? b.media.link;
+        const label = b.media.filename ?? (url && !url.startsWith('/') ? url : `${b.media.type}${b.media.id ? ` · ${b.media.id}` : ''}`);
         return (
             <div className="space-y-1">
-                {b.media.type === 'image' && b.media.link ? (
-                    <img src={b.media.link} alt={b.media.caption ?? ''} className="max-h-72 rounded-md" />
+                {b.media.type === 'image' && url ? (
+                    <a href={url} target="_blank" rel="noreferrer">
+                        <img src={url} alt={b.media.caption ?? ''} className="max-h-72 rounded-md" loading="lazy" />
+                    </a>
+                ) : b.media.type === 'sticker' && url ? (
+                    <img src={url} alt="sticker" className="size-32" loading="lazy" />
+                ) : b.media.type === 'video' && url ? (
+                    <video src={url} controls preload="metadata" className="max-h-72 rounded-md" />
+                ) : b.media.type === 'audio' && url ? (
+                    <audio src={url} controls preload="metadata" className="h-10 w-64 max-w-full" />
                 ) : (
-                    <div className="flex items-center gap-2 rounded-md bg-black/5 px-2.5 py-2 text-sm">
+                    <a href={url ? `${url}${url.startsWith('/') ? '?download=1' : ''}` : undefined} target="_blank" rel="noreferrer" className={cn('flex items-center gap-2 rounded-md bg-black/5 px-2.5 py-2 text-sm', url && 'hover:bg-black/10')}>
                         <Icon className="size-4 shrink-0" />
-                        <span className="truncate">{b.media.filename ?? b.media.link ?? `${b.media.type}${b.media.id ? ` · ${b.media.id}` : ''}`}</span>
-                    </div>
+                        <span className="min-w-0 flex-1 truncate">{label}</span>
+                        {url && <Download className="size-3.5 shrink-0 opacity-60" />}
+                        {b.media.pending && <Loader2 className="size-3.5 shrink-0 animate-spin opacity-60" />}
+                    </a>
                 )}
                 {b.media.caption && <p className="text-sm whitespace-pre-wrap">{b.media.caption}</p>}
             </div>
@@ -82,6 +94,12 @@ export default function MessageBubble({ m, onReply }: { m: ChatMessage; onReply?
                 title="Double-click to reply"
             >
                 {m.context_wamid && <p className="mb-1 border-l-2 border-brand bg-black/5 px-2 py-1 text-[11px] text-muted-foreground">Reply</p>}
+                {m.origin === 'broadcast' && (
+                    <p className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">
+                        <Megaphone className="size-3" /> Broadcast
+                    </p>
+                )}
+                {m.origin === 'system' && <p className="mb-0.5 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">Auto-reply</p>}
                 <Content m={m} />
                 <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] text-muted-foreground">
                     <span>{formatTime(m.timestamp)}</span>

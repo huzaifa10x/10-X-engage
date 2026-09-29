@@ -64,6 +64,18 @@ class MessagingService
         return $this->client->get($mediaId, array_filter(['phone_number_id' => $phoneNumberId]));
     }
 
+    /**
+     * Resolve a media ID and download the bytes (URL is only valid ~5 minutes, so do both at once).
+     *
+     * @return array{meta: array, contents: string}
+     */
+    public function downloadMedia(string $mediaId, ?string $phoneNumberId = null): array
+    {
+        $meta = $this->mediaUrl($mediaId, $phoneNumberId);
+
+        return ['meta' => $meta, 'contents' => $this->client->downloadUrl($meta['url'])];
+    }
+
     /** "Delete Media" — DELETE /{{Media-ID}}?phone_number_id= */
     public function deleteMedia(string $mediaId, ?string $phoneNumberId = null): array
     {

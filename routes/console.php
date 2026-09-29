@@ -10,3 +10,6 @@ Artisan::command('inspire', function () {
 
 // Keep the local template list in step with Meta (approvals, quality changes, deletions).
 Schedule::command('engage:sync-templates')->hourly();
+
+// Launch broadcasts whose scheduled time has arrived.
+Schedule::command('engage:dispatch-broadcasts')->everyMinute();

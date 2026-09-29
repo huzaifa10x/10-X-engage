@@ -1,6 +1,12 @@
 <?php
 
+use App\Http\Controllers\Analytics\AnalyticsController;
+use App\Http\Controllers\Broadcasts\BroadcastController;
+use App\Http\Controllers\Broadcasts\SegmentController;
+use App\Http\Controllers\Contacts\ContactConsentController;
 use App\Http\Controllers\Contacts\ContactController;
+use App\Http\Controllers\Contacts\ContactImportController;
+use App\Http\Controllers\DataDeletionController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\Inbox\InboxController;
 use App\Http\Controllers\Messaging\MediaController;
@@ -27,6 +33,8 @@ Route::get('terms-of-service', function () {
 Route::get('user-data-deletion', function () {
     return Inertia::render('user-data-deletion');
 })->name('user-dd');
+Route::post('api/data-deletion-callback', [DataDeletionController::class, 'callback'])->name('deletion.callback');
+Route::get('deletion-status', [DataDeletionController::class, 'status'])->name('deletion.status');
 
 /*
 |--------------------------------------------------------------------------
@@ -72,12 +80,41 @@ Route::middleware(['auth'])->group(function () {
     /* Contacts -------------------------------------------------------------- */
     Route::prefix('contacts')->name('contacts.')->group(function () {
         Route::get('/', [ContactController::class, 'index'])->name('index');
+        Route::get('import', [ContactImportController::class, 'create'])->name('import');
+        Route::post('import/preview', [ContactImportController::class, 'preview'])->name('import.preview');
+        Route::post('import', [ContactImportController::class, 'store'])->name('import.store');
+        Route::put('{contact}/consent', [ContactConsentController::class, 'update'])->name('consent');
         Route::get('create', [ContactController::class, 'create'])->name('create');
         Route::post('/', [ContactController::class, 'store'])->name('store');
         Route::get('{contact}/edit', [ContactController::class, 'edit'])->name('edit');
         Route::put('{contact}', [ContactController::class, 'update'])->name('update');
         Route::delete('{contact}', [ContactController::class, 'destroy'])->name('destroy');
     });
+
+    /* Segments & broadcasts --------------------------------------------------- */
+    Route::prefix('segments')->name('segments.')->group(function () {
+        Route::get('/', [SegmentController::class, 'index'])->name('index');
+        Route::get('create', [SegmentController::class, 'create'])->name('create');
+        Route::post('count', [SegmentController::class, 'count'])->name('count');
+        Route::post('/', [SegmentController::class, 'store'])->name('store');
+        Route::get('{segment}/edit', [SegmentController::class, 'edit'])->name('edit');
+        Route::put('{segment}', [SegmentController::class, 'update'])->name('update');
+        Route::delete('{segment}', [SegmentController::class, 'destroy'])->name('destroy');
+    });
+    Route::prefix('broadcasts')->name('broadcasts.')->group(function () {
+        Route::get('/', [BroadcastController::class, 'index'])->name('index');
+        Route::get('create', [BroadcastController::class, 'create'])->name('create');
+        Route::post('/', [BroadcastController::class, 'store'])->name('store');
+        Route::get('{broadcast}', [BroadcastController::class, 'show'])->name('show');
+        Route::get('{broadcast}/progress', [BroadcastController::class, 'progress'])->name('progress');
+        Route::get('{broadcast}/edit', [BroadcastController::class, 'edit'])->name('edit');
+        Route::put('{broadcast}', [BroadcastController::class, 'update'])->name('update');
+        Route::post('{broadcast}/launch', [BroadcastController::class, 'launch'])->name('launch');
+        Route::post('{broadcast}/cancel', [BroadcastController::class, 'cancel'])->name('cancel');
+        Route::delete('{broadcast}', [BroadcastController::class, 'destroy'])->name('destroy');
+    });
+
+    Route::get('analytics', [AnalyticsController::class, 'index'])->name('analytics.index');
 
     /* Inbox (WhatsApp-style chat) ------------------------------------------- */
     Route::prefix('inbox')->name('inbox.')->group(function () {
@@ -97,6 +134,7 @@ Route::middleware(['auth'])->group(function () {
         Route::get('{message}', [MessageController::class, 'show'])->name('show');
     });
     Route::post('media', [MediaController::class, 'store'])->name('media.store');
+    Route::get('media/{asset}', [MediaController::class, 'show'])->name('media.show');
 
     /* Templates ------------------------------------------------------------ */
     Route::prefix('templates')->name('templates.')->group(function () {

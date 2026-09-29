@@ -147,6 +147,39 @@ via `App\Support\TemplateRenderer`, reading `payload.template.components` of the
 The Cloud API does not expose customers' profile photos (only `contacts[].profile.name`), so the inbox shows
 initials. A photo can be attached to a contact manually if needed.
 
+## 6c. Phase 3 — media, consent, queued sending, broadcasts, analytics
+
+- **Inbound media** — every image/video/audio/document/sticker received is recorded as a `media_assets` row and
+  copied into private storage by `DownloadInboundMedia` (Meta's media URLs expire in minutes). Files are streamed
+  through `GET /media/{asset}` (workspace-scoped). Our own uploads are stored the same way, so the inbox renders
+  both directions inline.
+- **Consent** — `contacts.opt_in_status` (unknown / opted_in / opted_out) + scope, an append-only
+  `consent_events` ledger and a `suppression_list`. Inbound STOP/START keywords (whole-message match,
+  configurable per workspace in `settings`, defaults in `config/whatsapp.php → consent`) flip the status and send
+  an auto-reply. Business-initiated sends (templates, broadcasts) are refused for opted-out / suppressed contacts;
+  free-form replies inside a customer-opened window are still allowed. Manual changes and CSV imports record the
+  acting user and the consent text.
+- **CSV import** — `/contacts/import`: upload → auto column mapping → import. Matched on number; existing contacts
+  updated, tags merged.
+- **Queued outbound** — `SendMessage::record(..., queue: true)` + `SendMessageJob` (rate limited via
+  `RateLimiter 'whatsapp-send'`, `WHATSAPP_BROADCAST_RATE`/s, retries on transient Graph errors). Inbox/composer
+  still send inline for instant feedback.
+- **Segments** — saved rule trees compiled to SQL by `App\Support\SegmentQuery` (tags, fields, source, consent,
+  window, date ranges, `custom.<key>` JSON fields). Live counts: `POST /segments/count`.
+- **Broadcasts** — template + variables (`{{contact.name}}`, `{{contact.first_name}}`, `{{contact.phone}}`,
+  `{{contact.email}}`, `{{contact.company}}`, any custom field) + segment/all + optional "opted-in only" gate.
+  `LaunchBroadcast` snapshots the audience into `broadcast_recipients` (excluded contacts recorded as skipped with a
+  reason), `ProcessBroadcast` builds one message per recipient in chunks and queues `SendMessageJob`s; status
+  webhooks update per-recipient status and the counters. Scheduled broadcasts are started by
+  `engage:dispatch-broadcasts` (scheduler, every minute). Report page polls `/broadcasts/{id}/progress`.
+- **Analytics** — `/analytics`: sent / delivered / read / failed / received per day (7/30/90 d), per number,
+  top templates, failure reasons, contact consent totals.
+- **Data deletion callback** — `POST /api/data-deletion-callback` verifies Meta's `signed_request` and returns
+  `{url, confirmation_code}`; enter it in App Settings → Basic → *Data deletion request URL*.
+
+Server requirements for this phase: the queue worker (already), the scheduler cron
+(`php artisan schedule:run` every minute) and a writable `storage/app/private`.
+
 ## 7. Webhooks
 
 `GET /webhooks/whatsapp` handles the `hub.challenge` handshake; `POST /webhooks/whatsapp` validates
@@ -169,7 +202,7 @@ app/
   Policies/           Workspace scoping
 config/whatsapp.php   All Meta settings
 database/migrations/  Schema (see file headers)
-resources/js/pages/   onboarding/, accounts/, contacts/, inbox/, messages/, templates/, dashboard
+resources/js/pages/   onboarding/, accounts/, contacts/, inbox/, segments/, broadcasts/, analytics/, messages/, templates/, dashboard
 resources/js/components/inbox/  conversation list, bubbles, composer, template dialog, window badge
 resources/js/hooks/use-embedded-signup.ts   FB SDK + session logging + FB.login
 tests/                Unit tests for both payload builders; feature tests for onboarding, registration, webhooks

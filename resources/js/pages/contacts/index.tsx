@@ -11,16 +11,17 @@ import { formatListTime } from '@/lib/format';
 import { type BreadcrumbItem, type Paginated } from '@/types';
 import { type ContactRow } from '@/types/whatsapp';
 import { Head, Link, router } from '@inertiajs/react';
-import { MessageSquareText, Pencil, Plus, Trash2 } from 'lucide-react';
+import OptInBadge from '@/components/opt-in-badge';
+import { FileUp, MessageSquareText, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 const breadcrumbs: BreadcrumbItem[] = [{ title: 'Contacts', href: '/contacts' }];
 
 interface Props {
     contacts: Paginated<ContactRow>;
-    filters: { q?: string; window?: string; tag?: string };
+    filters: { q?: string; window?: string; tag?: string; opt_in?: string };
     tags: string[];
-    stats: { total: number; open_windows: number; unread: number };
+    stats: { total: number; open_windows: number; unread: number; opted_in: number; opted_out: number };
 }
 
 export default function ContactsIndex({ contacts, filters, tags, stats }: Props) {
@@ -35,18 +36,27 @@ export default function ContactsIndex({ contacts, filters, tags, stats }: Props)
                     title="Contacts"
                     description="Every WhatsApp number you talk to. Contacts are created here or automatically when someone messages your business number."
                     actions={
-                        <Button asChild>
-                            <Link href={route('contacts.create')}>
-                                <Plus /> New contact
-                            </Link>
-                        </Button>
+                        <>
+                            <Button asChild variant="outline">
+                                <Link href={route('contacts.import')}>
+                                    <FileUp /> Import CSV
+                                </Link>
+                            </Button>
+                            <Button asChild>
+                                <Link href={route('contacts.create')}>
+                                    <Plus /> New contact
+                                </Link>
+                            </Button>
+                        </>
                     }
                 />
                 <FlashMessages />
 
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
                     {[
                         { label: 'Contacts', value: stats.total },
+                        { label: 'Opted in', value: stats.opted_in },
+                        { label: 'Opted out', value: stats.opted_out },
                         { label: 'Open windows', value: stats.open_windows },
                         { label: 'Unread', value: stats.unread },
                     ].map((s) => (
@@ -84,6 +94,17 @@ export default function ContactsIndex({ contacts, filters, tags, stats }: Props)
                                     <SelectItem value="closed">Window closed</SelectItem>
                                 </SelectContent>
                             </Select>
+                            <Select value={filters.opt_in ?? 'all'} onValueChange={(v) => apply({ opt_in: v === 'all' ? undefined : v })}>
+                                <SelectTrigger className="w-40">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    <SelectItem value="all">Any consent</SelectItem>
+                                    <SelectItem value="opted_in">Opted in</SelectItem>
+                                    <SelectItem value="opted_out">Opted out</SelectItem>
+                                    <SelectItem value="unknown">Unknown</SelectItem>
+                                </SelectContent>
+                            </Select>
                             {tags.length > 0 && (
                                 <Select value={filters.tag ?? 'all'} onValueChange={(v) => apply({ tag: v === 'all' ? undefined : v })}>
                                     <SelectTrigger className="w-40">
@@ -107,6 +128,7 @@ export default function ContactsIndex({ contacts, filters, tags, stats }: Props)
                                     <tr>
                                         <th className="py-2 pr-3">Contact</th>
                                         <th className="py-2 pr-3">Tags</th>
+                                        <th className="py-2 pr-3">Consent</th>
                                         <th className="py-2 pr-3">Conversation window</th>
                                         <th className="py-2 pr-3">Last message</th>
                                         <th className="py-2 pr-3">Source</th>
@@ -116,7 +138,7 @@ export default function ContactsIndex({ contacts, filters, tags, stats }: Props)
                                 <tbody className="divide-y">
                                     {contacts.data.length === 0 && (
                                         <tr>
-                                            <td colSpan={6} className="py-10 text-center text-muted-foreground">
+                                            <td colSpan={7} className="py-10 text-center text-muted-foreground">
                                                 No contacts found.
                                             </td>
                                         </tr>
@@ -143,6 +165,9 @@ export default function ContactsIndex({ contacts, filters, tags, stats }: Props)
                                                         </span>
                                                     ))}
                                                 </div>
+                                            </td>
+                                            <td className="py-2.5 pr-3">
+                                                <OptInBadge status={c.opt_in_status} />
                                             </td>
                                             <td className="py-2.5 pr-3">
                                                 <WindowBadge window={c.window} />

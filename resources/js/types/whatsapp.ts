@@ -129,6 +129,10 @@ export interface ContactRow {
     last_message_preview: string | null;
     last_message_direction: 'inbound' | 'outbound' | null;
     window: WindowState;
+    opt_in_status: 'unknown' | 'opted_in' | 'opted_out';
+    opt_in_scope: string[];
+    opted_at: string | null;
+    last_activity_at: string | null;
     created_at: string | null;
 }
 
@@ -141,7 +145,7 @@ export interface ChatMessage {
     preview: string | null;
     body: {
         text?: string;
-        media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null };
+        media?: { type: string; id: string | null; link: string | null; caption: string | null; filename: string | null; mime_type: string | null; url?: string | null; pending?: boolean };
         location?: { latitude: string; longitude: string; name?: string; address?: string } | null;
         template?: { name: string | null; header: string | null; body: string; footer: string | null; buttons: { type: string; text: string | null }[] };
         interactive?: Record<string, unknown> | null;
@@ -149,6 +153,7 @@ export interface ChatMessage {
     };
     context_wamid: string | null;
     template_id: number | null;
+    origin?: string;
     error_code: number | null;
     error_message: string | null;
     sent_at: string | null;
@@ -176,4 +181,49 @@ export interface InboxTemplate {
     language: string;
     category: string;
     components: TemplateComponent[];
+}
+
+/* Segments & broadcasts ------------------------------------------------------ */
+
+export type SegmentRule = {
+    field: string;
+    op: string;
+    value: string;
+};
+
+export interface SegmentRow {
+    id: number;
+    name: string;
+    description: string | null;
+    rules_count: number;
+    count: number;
+    updated_at: string | null;
+}
+
+export interface BroadcastCounts {
+    total: number;
+    queued: number;
+    sent: number;
+    delivered: number;
+    read: number;
+    failed: number;
+    skipped: number;
+}
+
+export interface BroadcastRow {
+    id: number;
+    name: string;
+    status: 'draft' | 'scheduled' | 'queued' | 'sending' | 'completed' | 'cancelled' | 'failed';
+    phone_number_id: number;
+    message_template_id: number | null;
+    segment_id: number | null;
+    require_opt_in: boolean;
+    template: { id: number; name: string } | null;
+    sender: string | null;
+    segment: string | null;
+    scheduled_at: string | null;
+    started_at: string | null;
+    completed_at: string | null;
+    counts: BroadcastCounts;
+    created_at: string | null;
 }

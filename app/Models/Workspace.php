@@ -16,6 +16,22 @@ class Workspace extends Model
         return ['settings' => 'array'];
     }
 
+    /** Workspace-level settings with sensible defaults (keywords, consent policy). */
+    public function setting(string $key, mixed $default = null): mixed
+    {
+        return data_get($this->settings ?? [], $key, config("whatsapp.consent.{$key}", $default));
+    }
+
+    public function segments(): HasMany
+    {
+        return $this->hasMany(Segment::class);
+    }
+
+    public function broadcasts(): HasMany
+    {
+        return $this->hasMany(Broadcast::class);
+    }
+
     public function owner(): BelongsTo
     {
         return $this->belongsTo(User::class, 'owner_id');

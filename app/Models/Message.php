@@ -12,7 +12,7 @@ class Message extends Model
     public const DIRECTION_INBOUND = 'inbound';
 
     protected $fillable = [
-        'workspace_id', 'phone_number_id', 'contact_id', 'message_template_id', 'user_id', 'wamid', 'direction',
+        'workspace_id', 'phone_number_id', 'contact_id', 'message_template_id', 'media_asset_id', 'broadcast_id', 'origin', 'user_id', 'wamid', 'direction',
         'type', 'status', 'to', 'from', 'context_wamid', 'preview', 'payload', 'response', 'conversation_id',
         'conversation_origin', 'pricing_category', 'billable', 'error_code', 'error_title', 'error_message',
         'error_data', 'sent_at', 'delivered_at', 'read_at', 'failed_at', 'received_at',
@@ -46,6 +46,16 @@ class Message extends Model
     public function contact(): BelongsTo
     {
         return $this->belongsTo(Contact::class);
+    }
+
+    public function mediaAsset(): BelongsTo
+    {
+        return $this->belongsTo(MediaAsset::class);
+    }
+
+    public function broadcast(): BelongsTo
+    {
+        return $this->belongsTo(Broadcast::class);
     }
 
     public function template(): BelongsTo
